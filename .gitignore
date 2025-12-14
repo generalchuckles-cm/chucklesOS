@@ -1,0 +1,8 @@
+/edk2-omvf/
+/limine/
+/disk.img
+/convertimage.py
+/*.json
+/node_modules/
+/Physical
+
