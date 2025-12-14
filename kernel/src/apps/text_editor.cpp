@@ -1,229 +1,427 @@
-#include "terminal.h"
+#include "text_editor.h"
+#include "../globals.h"
+#include "../input.h"
+#include "../fs/fat32.h"
+#include "../memory/heap.h"
 #include "../cppstd/string.h"
 #include "../cppstd/stdio.h"
-#include "../cppstd/stdlib.h"
-#include "../globals.h"
 #include "../timer.h"
-#include "../pci/lspci.h"
-#include "../memory/heap.h"
-#include "../memory/swp.h"
-#include "../memory/pmm.h"
-#include "../fs/fat32.h"
 #include "../io.h"
-#include "../loader/raw_loader.h"
-#include "../drv/usb/xhci.h"
-#include "../drv/storage/ahci.h"
-#include "../drv/net/e1000.h"
-#include "../input.h" 
-#include "../net/network.h" 
-#include "../net/tcp.h"
-#include "../sys/chuckles_daemon.h"
 
-// --- App Headers ---
-#include "../stress/stress.h"
-#include "../dvd.h"
-#include "../3dengine/engine.h"
-#include "../sound/midi_player.h"
-#include "../apps/nes.h"
-#include "../apps/compiler.h"
-#include "../apps/text_editor.h"
-#include "../browse/browse.h"
-#include "../apps/cpl_compiler.h"
+// --- Configuration ---
+#define EDITOR_MAX_BUF 65536
+#define TAB_SIZE 4
 
-extern int g_sata_port;
+// --- VS Code Dark Theme Colors ---
+#define BG_COLOR      0x1E1E1E // Dark Grey Background
+#define LINE_NUM_COL  0x858585 // Grey Line Numbers
+#define CURSOR_COL    0xAEAFAD // Light Grey Cursor
+#define STATUS_BG     0x007ACC // Blue Status Bar
+#define STATUS_FG     0xFFFFFF
 
-void TerminalApp::on_init(Window* win) {
-    my_window = win;
-    input_index = 0;
-    memset(input_buffer, 0, sizeof(input_buffer));
-    
-    g_console = win->console;
-    
-    win->renderer->clear(0x000000);
-    win->console->setColor(0xFFFFFF, 0x000000);
-    win->console->print("ChucklesOS Shell (CPL Ready)\n$ ");
+// Syntax Colors
+#define COL_DEFAULT   0xD4D4D4 // Light Grey
+#define COL_KEYWORD   0xC586C0 // Purple (Control flow: if, while, func)
+#define COL_TYPE      0x569CD6 // Blue (int, str, void)
+#define COL_FUNC      0xDCDCAA // Light Yellow (printf, malloc, drawrect)
+#define COL_STRING    0xCE9178 // Orange/Brown
+#define COL_NUMBER    0xB5CEA8 // Light Green
+#define COL_COMMENT   0x6A9955 // Green
+#define COL_PREPROC   0xE06C75 // Red/Pink (.header)
+#define COL_OPERATOR  0xD4D4D4 // White
+
+// --- Editor Global State ---
+static bool g_editor_running = true;
+static char* g_buffer = nullptr;
+static uint32_t g_buf_len = 0;
+static uint32_t g_cursor_pos = 0;
+static char g_filename[32];
+static bool g_dirty = false;
+
+// Viewport state
+static int g_scroll_line = 0;
+static int g_screen_rows = 0;
+static int g_screen_cols = 0;
+
+// --- Syntax Helpers ---
+
+static bool is_separator(char c) {
+    return (c == ' ' || c == '\n' || c == '\t' || c == '\r' || 
+            c == '(' || c == ')' || c == '{' || c == '}' || 
+            c == '[' || c == ']' || c == ',' || c == ';' || 
+            c == '+' || c == '-' || c == '*' || c == '/' || 
+            c == '=' || c == '<' || c == '>' || c == '!');
 }
 
-void TerminalApp::on_draw() {}
-
-void TerminalApp::on_input(char c) {
-    g_console = my_window->console;
-    
-    if (c == '\n') {
-        g_console->putChar('\n');
-        if (input_index > 0) {
-            execute_command();
-        }
-        memset(input_buffer, 0, sizeof(input_buffer));
-        input_index = 0;
-        g_console->print("$ ");
-    } 
-    else if (c == '\b') {
-        if (input_index > 0) {
-            input_index--;
-            input_buffer[input_index] = 0;
-            g_console->putChar('\b');
-        }
+static uint32_t get_keyword_color(const char* word, int len) {
+    // 1. Control Flow & Structure (Purple)
+    if ((len==4 && memcmp(word, "func", 4)==0) ||
+        (len==4 && memcmp(word, "done", 4)==0) ||
+        (len==2 && memcmp(word, "if", 2)==0)   ||
+        (len==4 && memcmp(word, "else", 4)==0) ||
+        (len==5 && memcmp(word, "while", 5)==0)||
+        (len==3 && memcmp(word, "asm", 3)==0)  || 
+        (len==6 && memcmp(word, "return", 6)==0)) {
+        return COL_KEYWORD;
     }
-    else if (input_index < 255) {
-        input_buffer[input_index++] = c;
-        input_buffer[input_index] = 0;
-        g_console->putChar(c);
+
+    // 2. Types (Blue)
+    if ((len==3 && memcmp(word, "int", 3)==0) ||
+        (len==4 && memcmp(word, "int8", 4)==0) ||
+        (len==3 && memcmp(word, "flt", 3)==0) ||
+        (len==4 && memcmp(word, "flt4", 4)==0)||
+        (len==4 && memcmp(word, "char", 4)==0)||
+        (len==3 && memcmp(word, "str", 3)==0) ||
+        (len==3 && memcmp(word, "ptr", 3)==0) ||
+        (len==4 && memcmp(word, "void", 4)==0)) {
+        return COL_TYPE;
+    }
+
+    // 3. System Intrinsics / Functions (Yellow)
+    if ((len==6 && memcmp(word, "printf", 6)==0)   ||
+        (len==8 && memcmp(word, "printbuf", 8)==0) ||
+        (len==6 && memcmp(word, "malloc", 6)==0)   ||
+        (len==7 && memcmp(word, "rmalloc", 7)==0)  ||
+        (len==5 && memcmp(word, "sleep", 5)==0)    ||
+        (len==8 && memcmp(word, "drawrect", 8)==0) ||
+        (len==9 && memcmp(word, "disk_read", 9)==0)||
+        (len==10&& memcmp(word, "disk_write", 10)==0)||
+        (len==5 && memcmp(word, "getch", 5)==0)    ||
+        (len==3 && memcmp(word, "inb", 3)==0)      ||
+        (len==3 && memcmp(word, "inw", 3)==0)      ||
+        (len==3 && memcmp(word, "inl", 3)==0)      ||
+        (len==4 && memcmp(word, "outb", 4)==0)     ||
+        (len==4 && memcmp(word, "outw", 4)==0)     ||
+        (len==4 && memcmp(word, "outl", 4)==0)     ||
+        (len==3 && memcmp(word, "mov", 3)==0)      || // ASM mnemonics
+        (len==3 && memcmp(word, "add", 3)==0)      ||
+        (len==3 && memcmp(word, "sub", 3)==0)      ||
+        (len==3 && memcmp(word, "int", 3)==0)) {
+        return COL_FUNC;
+    }
+
+    // Default variable/identifier color
+    return COL_DEFAULT; 
+}
+
+// --- IO Helpers ---
+
+static void save_file() {
+    if (Fat32::getInstance().write_file(g_filename, g_buffer, g_buf_len)) {
+        g_dirty = false;
+        // Visual feedback
+        int status_y = g_screen_rows * 16;
+        g_renderer->drawRect(0, status_y, g_renderer->getWidth(), 16, 0x00FF00); // Flash Green
+        g_renderer->drawString(0, status_y, " FILE SAVED SUCCESSFULLY ", 0x000000);
+        sleep_ms(500);
+    } else {
+        int status_y = g_screen_rows * 16;
+        g_renderer->drawRect(0, status_y, g_renderer->getWidth(), 16, 0xFF0000); // Flash Red
+        g_renderer->drawString(0, status_y, " ERROR SAVING FILE ", 0xFFFFFF);
+        sleep_ms(500);
     }
 }
 
-void TerminalApp::execute_command() {
-    char* argv[32];
-    int argc = 0;
-    bool in_token = false;
+// --- Input Processing ---
+
+static void process_key(char c) {
+    if (c == 27) { // ESC
+        g_editor_running = false;
+        return;
+    }
+
+    // Ctrl+S to Save
+    if (g_ctrl_pressed && (c == 's' || c == 'S' || c == 19)) {
+        save_file();
+        return;
+    }
+
+    // Navigation (Using Extended ASCII keys 128+)
+    if (c == (char)KEY_UP) {
+        int curr = g_cursor_pos;
+        int col = 0;
+        // Find start of current line
+        while (curr > 0 && g_buffer[curr-1] != '\n') { curr--; col++; }
+        
+        if (curr > 0) {
+            curr--; // Step back to previous line
+            // Find start of previous line
+            while (curr > 0 && g_buffer[curr-1] != '\n') curr--;
+            
+            // Calculate length of previous line
+            int line_len = 0;
+            int temp = curr;
+            while (temp < (int)g_buf_len && g_buffer[temp] != '\n') { temp++; line_len++; }
+            
+            if (col > line_len) col = line_len;
+            g_cursor_pos = curr + col;
+        }
+        return;
+    }
+
+    if (c == (char)KEY_DOWN) {
+        int curr = g_cursor_pos;
+        // Find end of current line
+        while (curr < (int)g_buf_len && g_buffer[curr] != '\n') curr++;
+        
+        if (curr < (int)g_buf_len) {
+            // We are at the newline char
+            int col = 0;
+            int temp = g_cursor_pos;
+            // Calculate current column
+            while (temp > 0 && g_buffer[temp-1] != '\n') { temp--; col++; }
+
+            curr++; // Move to start of next line
+            int next_start = curr;
+            int line_len = 0;
+            while (curr < (int)g_buf_len && g_buffer[curr] != '\n') { curr++; line_len++; }
+            
+            if (col > line_len) col = line_len;
+            g_cursor_pos = next_start + col;
+        }
+        return;
+    }
+
+    if (c == (char)KEY_LEFT) {
+        if (g_cursor_pos > 0) g_cursor_pos--;
+        return;
+    }
     
-    for (int i = 0; input_buffer[i] != 0 && argc < 32; i++) {
-        if (input_buffer[i] == ' ') { 
-            input_buffer[i] = 0; 
-            in_token = false; 
-        } else if (!in_token) { 
-            argv[argc++] = &input_buffer[i]; 
-            in_token = true; 
+    if (c == (char)KEY_RIGHT) {
+        if (g_cursor_pos < g_buf_len) g_cursor_pos++;
+        return;
+    }
+
+    if (c == '\b') { // Backspace
+        if (g_cursor_pos > 0) {
+            memmove(g_buffer + g_cursor_pos - 1, g_buffer + g_cursor_pos, g_buf_len - g_cursor_pos);
+            g_buf_len--;
+            g_cursor_pos--;
+            g_dirty = true;
+        }
+        return;
+    }
+
+    // Normal Typing (including Tab and Enter)
+    if (c >= 32 || c == '\n' || c == '\t') {
+        if (g_buf_len < EDITOR_MAX_BUF - 1) {
+            memmove(g_buffer + g_cursor_pos + 1, g_buffer + g_cursor_pos, g_buf_len - g_cursor_pos);
+            g_buffer[g_cursor_pos] = c;
+            g_cursor_pos++;
+            g_buf_len++;
+            g_dirty = true;
         }
     }
-    
-    if (argc == 0) return;
+}
 
-    // --- CPL COMPILER ---
-    if (strcmp(argv[0], "cpl") == 0) {
-        if(argc > 2) cpl_compile(argv[1], argv[2]);
-        else printf("Usage: cpl <source.cpl> <output.bin>\n");
+// --- Rendering ---
+
+static void render_editor() {
+    // 1. Calculate Cursor Position & Scrolling
+    int current_line = 0;
+    for (uint32_t i = 0; i < g_cursor_pos; i++) {
+        if (g_buffer[i] == '\n') current_line++;
     }
-    // --- BROWSER COMMANDS ---
-    else if (strcmp(argv[0], "browse") == 0) {
-        if (argc > 1) {
-            BrowserApp* app = new BrowserApp();
-            Window* win = new Window(150, 150, 800, 600, "ChucklesBrowse", app);
-            WindowManager::getInstance().add_window(win);
-            app->navigate(argv[1]);
+    
+    // Auto-scroll
+    if (current_line < g_scroll_line) g_scroll_line = current_line;
+    if (current_line >= g_scroll_line + g_screen_rows) g_scroll_line = current_line - g_screen_rows + 1;
+
+    // 2. Clear Screen
+    g_renderer->clear(BG_COLOR);
+
+    int draw_y = 0;
+    int draw_x = 0;
+    uint32_t i = 0;
+    
+    // Skip lines that are scrolled off-screen
+    int skip = g_scroll_line;
+    while (skip > 0 && i < g_buf_len) {
+        if (g_buffer[i] == '\n') skip--;
+        i++;
+    }
+
+    // 3. Render Loop
+    bool in_string = false;
+    bool in_comment = false;
+    bool in_preproc = false;
+
+    // Draw Line Number Gutter Background
+    g_renderer->drawRect(0, 0, 32, g_renderer->getHeight(), 0x252526);
+
+    // Initial Line Number
+    char lnbuf[8];
+    sprintf(lnbuf, "%3d", g_scroll_line + 1);
+    g_renderer->drawString(0, 0, lnbuf, LINE_NUM_COL);
+    draw_x = 40; // Start text after gutter
+
+    while (i < g_buf_len && draw_y < g_screen_rows) {
+        char c = g_buffer[i];
+        
+        // --- State Management ---
+        // Reset line-based states on newline
+        if (c == '\n') {
+            in_comment = false;
+            in_preproc = false;
+            in_string = false; // Strings don't span lines in CPL usually
+            
+            draw_y++;
+            draw_x = 0;
+            
+            // Draw next line number
+            if (draw_y < g_screen_rows) {
+                sprintf(lnbuf, "%3d", g_scroll_line + draw_y + 1);
+                g_renderer->drawString(0, draw_y * 16, lnbuf, LINE_NUM_COL);
+            }
+            draw_x = 40;
+            i++;
+            continue;
+        }
+
+        // Check for Comment Start
+        if (!in_string && !in_comment && c == '/' && i+1 < g_buf_len && g_buffer[i+1] == '/') {
+            in_comment = true;
+        }
+
+        // Check for Preprocessor
+        if (!in_string && !in_comment && !in_preproc && c == '.') {
+            in_preproc = true;
+        }
+
+        // Check for String Toggle
+        if (!in_comment && c == '"') {
+            in_string = !in_string;
+            g_renderer->drawChar(draw_x, draw_y * 16, c, COL_STRING);
+            draw_x += 8;
+            i++;
+            continue;
+        }
+
+        // --- Color Decision ---
+        uint32_t color = COL_DEFAULT;
+
+        if (in_comment) {
+            color = COL_COMMENT;
+        } else if (in_string) {
+            color = COL_STRING;
+        } else if (in_preproc) {
+            color = COL_PREPROC;
         } else {
-            printf("Usage: browse <url>\n");
-        }
-    }
-    else if (strcmp(argv[0], "httpget") == 0) {
-        if (argc > 1) {
-            char* host = argv[1];
-            uint32_t ip = NetworkStack::getInstance().dns_lookup(host);
-            if (ip == 0) {
-                printf("Error: Could not resolve %s\n", host);
-            } else {
-                printf("Connecting to %d.%d.%d.%d...\n", 
-                    ip&0xFF, (ip>>8)&0xFF, (ip>>16)&0xFF, (ip>>24)&0xFF);
-                
-                TcpSocket sock;
-                if (sock.connect(ip, 80)) {
-                    char request[256];
-                    sprintf(request, "GET / HTTP/1.0\r\nHost: %s\r\n\r\n", host);
-                    sock.send((uint8_t*)request, strlen(request));
-                    
-                    uint8_t buf[1024];
-                    int total = 0;
-                    while(true) {
-                        int r = sock.recv(buf, 1023);
-                        if (r <= 0) break;
-                        buf[r] = 0;
-                        printf("%s", (char*)buf); 
-                        total += r;
+            // Advanced Token Highlighting
+            if (c >= '0' && c <= '9') {
+                color = COL_NUMBER;
+            } 
+            else if (is_separator(c)) {
+                color = COL_OPERATOR;
+            }
+            else {
+                // It's likely a word. Peek ahead to check if it's a keyword.
+                // Only scan if this is the start of a word
+                if (i == 0 || is_separator(g_buffer[i-1])) {
+                    int len = 0;
+                    while (i + len < g_buf_len && !is_separator(g_buffer[i + len])) {
+                        len++;
                     }
-                    printf("\n\n[Closed. Total: %d bytes]\n", total);
-                    sock.close();
-                } else {
-                    printf("Connect Failed.\n");
+                    
+                    uint32_t kw_col = get_keyword_color(&g_buffer[i], len);
+                    
+                    // If it is a keyword/type, draw the whole word now to ensure uniform color
+                    if (kw_col != COL_DEFAULT) {
+                        for(int k=0; k<len; k++) {
+                            g_renderer->drawChar(draw_x, draw_y * 16, g_buffer[i+k], kw_col);
+                            draw_x += 8;
+                        }
+                        i += len;
+                        continue; // Skip the main loop increment since we handled the word
+                    }
                 }
             }
+        }
+
+        // Handle Tab
+        if (c == '\t') {
+            draw_x += (8 * TAB_SIZE);
         } else {
-            printf("Usage: httpget <host>\n");
+            g_renderer->drawChar(draw_x, draw_y * 16, c, color);
+            draw_x += 8;
         }
+        
+        i++;
     }
-    // --- NETWORK COMMANDS ---
-    else if (strcmp(argv[0], "chameon") == 0) {
-        if (argc > 1 && strcmp(argv[1], "reload") == 0) {
-            ChucklesDaemon::getInstance().reload_network_config();
+
+    // 4. Draw Cursor (Blinking logic could be added, but solid for now)
+    int col_on_line = 0;
+    int temp = g_cursor_pos;
+    while (temp > 0 && g_buffer[temp-1] != '\n') { temp--; col_on_line++; }
+    
+    // Calculate tab compensation for cursor
+    int visual_col = 0;
+    temp = g_cursor_pos - col_on_line; // Start of line
+    for(int k=0; k<col_on_line; k++) {
+        if (g_buffer[temp + k] == '\t') visual_col += TAB_SIZE;
+        else visual_col++;
+    }
+
+    int rel_y = current_line - g_scroll_line;
+    if (rel_y >= 0 && rel_y < g_screen_rows) {
+        int cursor_screen_x = 40 + (visual_col * 8);
+        g_renderer->drawRect(cursor_screen_x, rel_y * 16, 2, 16, CURSOR_COL); 
+    }
+
+    // 5. Draw Status Bar
+    int status_y = g_screen_rows * 16;
+    g_renderer->drawRect(0, status_y, g_renderer->getWidth(), 16, STATUS_BG);
+    
+    char status[128];
+    sprintf(status, "  %s %s  |  CPL  |  Ln %d, Col %d  |  UTF-8", 
+        g_filename, g_dirty ? "*" : "", current_line + 1, col_on_line + 1);
+    
+    g_renderer->drawString(0, status_y, status, STATUS_FG);
+}
+
+// --- Main Entry Point ---
+
+void run_text_editor(const char* filename) {
+    g_editor_running = true;
+    g_dirty = false;
+    g_scroll_line = 0;
+    strcpy(g_filename, filename);
+
+    // Calculate layout based on font size (8x16)
+    g_screen_cols = g_renderer->getWidth() / 8;
+    g_screen_rows = (g_renderer->getHeight() / 16) - 1; // Leave room for status bar
+
+    g_buffer = (char*)malloc(EDITOR_MAX_BUF);
+    if (!g_buffer) {
+        printf("Editor: OOM\n");
+        return;
+    }
+    memset(g_buffer, 0, EDITOR_MAX_BUF);
+    g_buf_len = 0;
+    g_cursor_pos = 0;
+
+    // Load File
+    if (Fat32::getInstance().read_file(filename, g_buffer, EDITOR_MAX_BUF)) {
+        g_buf_len = strlen(g_buffer);
+        // Ensure cursor is at end or 0 (0 for now)
+        g_cursor_pos = 0;
+    } 
+    
+    sleep_ms(200); // Debounce enter key from shell
+    render_editor(); 
+
+    while (g_editor_running) {
+        char c = input_check_char();
+        if (c != 0) {
+            process_key(c);
+            render_editor();
         } else {
-            printf("Usage: chameon reload\n");
+            // Poll hooks (mouse, network) to keep OS alive
+            check_input_hooks();
+            asm volatile("hlt");
         }
     }
-    else if (strcmp(argv[0], "nslookup") == 0) {
-        if (argc > 1) {
-            uint32_t ip = NetworkStack::getInstance().dns_lookup(argv[1]);
-            if (ip) {
-                printf("%s -> %d.%d.%d.%d\n", argv[1], 
-                    ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
-            } else {
-                printf("DNS Resolution failed.\n");
-            }
-        } else {
-            printf("Usage: nslookup <hostname>\n");
-        }
-    }
-    else if (strcmp(argv[0], "ping") == 0) {
-        if (argc > 1) {
-            int ms = NetworkStack::getInstance().ping(argv[1]);
-            if (ms >= 0) printf("Reply: %dms\n", ms);
-            else printf("Timeout.\n");
-        }
-    }
-    else if (strcmp(argv[0], "netinit") == 0) E1000Driver::getInstance().init();
-    
-    // --- SYSTEM COMMANDS ---
-    else if (strcmp(argv[0], "help") == 0) {
-        printf("Commands: help, reboot, clear, sysinfo, lspci, free\n");
-        printf("Demos:    stress, dvd, 3drnd, playmidi, nes <rom>\n");
-        printf("Files:    ls, edit, mkfs, mount\n");
-        printf("Dev:      cpl <src> <out>, exec <bin>, cc <src> <out>\n");
-        printf("Net:      ping, nslookup, httpget, browse, netinit, chameon\n");
-        printf("Hardware: usbinit\n");
-    }
-    else if (strcmp(argv[0], "reboot") == 0) {
-        outb(0x64, 0xFE);
-    }
-    else if (strcmp(argv[0], "clear") == 0) my_window->renderer->clear(0);
-    else if (strcmp(argv[0], "sysinfo") == 0) {
-        printf("ChucklesOS v3.0\n");
-        printf("RAM: %d MB Used / %d MB Total\n", 
-            (int)(pmm_get_used_memory()/1024/1024), 
-            (int)(pmm_get_total_memory()/1024/1024));
-        printf("CPU Speed: %d MHz\n", (int)(get_cpu_frequency()/1000000));
-    }
-    else if (strcmp(argv[0], "lspci") == 0) lspci_run_detailed();
-    else if (strcmp(argv[0], "free") == 0) heap_print_stats();
-    
-    // --- DEMOS & DRIVERS ---
-    else if (strcmp(argv[0], "stress") == 0) run_stress_test(my_window->renderer);
-    else if (strcmp(argv[0], "dvd") == 0) run_dvd_demo(my_window->renderer);
-    else if (strcmp(argv[0], "3drnd") == 0) run_3d_demo(my_window->renderer);
-    else if (strcmp(argv[0], "playmidi") == 0) play_midi(nullptr, 0, nullptr, nullptr);
-    else if (strcmp(argv[0], "usbinit") == 0) XhciDriver::getInstance().init(0x8086, 0x31A8);
-    
-    // --- FILESYSTEM ---
-    else if (strcmp(argv[0], "mount") == 0) {
-        if (g_sata_port != -1) Fat32::getInstance().init(g_sata_port);
-    }
-    else if (strcmp(argv[0], "ls") == 0) Fat32::getInstance().ls();
-    else if (strcmp(argv[0], "mkfs") == 0) {
-        if(g_sata_port != -1) Fat32::getInstance().format(g_sata_port, 65536);
-    }
-    
-    // --- TOOLS ---
-    else if (strcmp(argv[0], "edit") == 0) {
-        if(argc>1) run_text_editor(argv[1]);
-    }
-    else if (strcmp(argv[0], "exec") == 0) {
-        if(argc>1) RawLoader::load_and_run(argv[1], argc - 1, &argv[1]);
-    }
-    else if (strcmp(argv[0], "cc") == 0) {
-        if(argc>2) run_compiler(argv[1], argv[2]);
-    }
-    else if (strcmp(argv[0], "nes") == 0) {
-        if(argc>1) run_nes(argv[1]);
-        else run_nes(NULL);
-    }
-    else {
-        printf("Unknown: %s\n", argv[0]);
-    }
+
+    free(g_buffer);
+    if (g_renderer) g_renderer->clear(0x000000);
 }
