@@ -7,6 +7,7 @@
 #include "../../timer.h"
 #include "../../interrupts/pic.h"
 #include "../../net/network.h" 
+#include "../../sys/system_stats.h" // Include Stats
 
 #define E1000_MMIO_VIRT 0xFFFFA00030000000
 
@@ -90,8 +91,7 @@ void E1000Driver::shutdown() {
     write_reg(E1000_TCTL, 0);
     
     initialized = false;
-    // Note: We leak the PMM pages for rings here for simplicity, 
-    // real OS would store them and reuse or free them.
+    SystemStats::getInstance().service_e1000_active = false;
 }
 
 bool E1000Driver::init() {
@@ -189,6 +189,10 @@ bool E1000Driver::init() {
 
     printf("E1000: Initialized.\n");
     initialized = true;
+    
+    // UPDATE STATS
+    SystemStats::getInstance().service_e1000_active = true;
+    
     return true;
 }
 

@@ -1,15 +1,31 @@
 #ifndef ENGINE_H
 #define ENGINE_H
 
-#include "../render.h"
-#include <cstdint>
+#include "../gui/window.h"
 
-// Runs the 3D Sphere Demo indefinitely until ESC is pressed.
-// override_speed_units: 
-//    0 = Auto-detect using CPUID/RDTSC.
-//   >0 = Manual speed in 100MHz increments (e.g., 34 = 3.4GHz).
-// target_fps:
-//    Target framerate (default 10).
-void run_3d_demo(Renderer* r, uint64_t override_speed_units = 0, uint64_t target_fps = 10);
+struct Vec3 { float x, y, z; };
+struct Point2D { int x, y; bool valid; };
+
+class Engine3DApp : public WindowApp {
+public:
+    void on_init(Window* win) override;
+    void on_draw() override;
+    void on_input(char c) override;
+
+private:
+    Window* my_window;
+    
+    // Scene State
+    float rotY;
+    float rotX;
+    
+    // Mesh Data (Static allocation for simplicity)
+    static const int NUM_RINGS = 12;
+    static const int SEGMENTS_PER_RING = 16;
+    Vec3 vertices[12 * 16]; 
+    Point2D projected[12 * 16];
+    
+    Vec3 rotate(Vec3 p, float angleY, float angleX);
+};
 
 #endif

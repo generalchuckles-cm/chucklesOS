@@ -1,4 +1,5 @@
 #include "pmm.h"
+#include "../sys/spinlock.h"
 #include <limine.h>
 #include "../cppstd/stdio.h"
 #include "../cppstd/string.h" 
@@ -27,6 +28,9 @@ static uint64_t used_ram = 0;
 
 // Global HHDM Offset
 uint64_t g_hhdm_offset = 0; 
+
+// SMP Lock
+static Spinlock pmm_lock;
 
 static void bitmap_set(uint64_t bit) {
     bitmap[bit / 8] |= (1 << (bit % 8));
@@ -136,6 +140,8 @@ void pmm_init() {
 }
 
 void* pmm_alloc(size_t count) {
+    ScopedLock lock(pmm_lock); // SMP Safety
+
     if (count == 0) return nullptr;
 
     uint64_t total_pages = highest_addr / PAGE_SIZE;
@@ -164,6 +170,8 @@ void* pmm_alloc(size_t count) {
 }
 
 void pmm_free(void* ptr, size_t count) {
+    ScopedLock lock(pmm_lock); // SMP Safety
+
     if (!ptr) return;
     
     uint64_t start_page = (uint64_t)ptr / PAGE_SIZE;

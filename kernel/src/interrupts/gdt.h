@@ -26,7 +26,10 @@ struct GDTDescriptor {
     uint64_t base;
 } __attribute__((packed));
 
-// Initialize GDT + TSS to catch stack corruptions
+// Initialize GDT + TSS for the BSP (Bootstrap Processor)
 void gdt_init();
+
+// Initialize GDT + TSS for an AP (Allocates new structures)
+void gdt_init_ap();
 
 #endif

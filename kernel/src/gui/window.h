@@ -5,14 +5,24 @@
 #include "../render.h"
 #include "../console.h"
 
+// Forward declaration allows WindowApp to use Window*
 class Window;
 
-// Abstract base class for applications running in a window
+// Abstract base class for applications
 class WindowApp {
 public:
     virtual void on_init(Window* win) = 0;
     virtual void on_draw() = 0;
     virtual void on_input(char c) = 0;
+    
+    // Handle mouse clicks relative to window content area
+    // Default implementation does nothing (optional for apps)
+    virtual void on_mouse(int rel_x, int rel_y, bool left) {
+        (void)rel_x;
+        (void)rel_y;
+        (void)left;
+    }
+    
     virtual ~WindowApp() {}
 };
 
@@ -22,9 +32,9 @@ public:
     int width, height;
     char title[64];
     
-    uint32_t* backing_buffer; // The window's private video memory
-    Renderer* renderer;       // A renderer bound to the private buffer
-    Console* console;         // A console bound to this window
+    uint32_t* backing_buffer; 
+    Renderer* renderer;       
+    Console* console;         
     
     WindowApp* app;
     bool should_close;
@@ -44,8 +54,8 @@ class WindowManager {
 public:
     static WindowManager& getInstance();
     
-    // Init now takes screen dims to allocate backbuffer
-    void init(int screen_w, int screen_h);
+    // Init with PHYSICAL screen dims
+    void init(int phys_w, int phys_h);
     
     void add_window(Window* win);
     void update();
@@ -61,19 +71,28 @@ private:
     int window_count;
     int focused_index;
     
-    // Double Buffering
-    uint32_t* backbuffer;
-    int screen_width;
-    int screen_height;
+    // Physical Screen Properties (Real Hardware)
+    int physical_width;
+    int physical_height;
+    uint32_t* physical_backbuffer; // The buffer we upscale TO
+
+    // Logical Screen Properties (Virtual Desktop)
+    int logical_width;
+    int logical_height;
+    uint32_t* logical_buffer; // The buffer we render windows INTO
     
-    // Mouse State Tracking
-    int last_mouse_x, last_mouse_y;
+    // Mouse Tracking
     bool last_mouse_left;
     
-    // Cursor Bitmap (Simple Arrow)
+    // Cursor
     static const int CURSOR_W = 12;
     static const int CURSOR_H = 17;
     static const uint8_t cursor_bitmap[];
+    
+    // Helper to resize logical buffer
+    void reallocate_buffers();
+    // Helper to process colors
+    uint32_t process_pixel(uint32_t c);
 };
 
 #endif

@@ -2,13 +2,14 @@
 #include "gdt.h"
 #include "pic.h"
 #include "../render.h"
-#include "../globals.h" 
+#include "../globals.h"
 #include "../cppstd/stdio.h"
 #include "../cppstd/string.h"
 #include "../drv/usb/xhci.h" 
 #include "../drv/ps2/ps2_mouse.h"
 #include "../drv/net/e1000.h"
 #include "../drv/ps2/ps2_kbd.h"
+#include "../sys/raw_panic.h" // Critical: Raw Panic for Double Faults
 
 struct IDTEntry {
     uint16_t offset_1; 
@@ -70,7 +71,9 @@ void idt_init() {
 
     for (int i = 0; i < 32; i++) {
         uint8_t ist = 0;
-        if (i == 8 || i == 14) ist = 1; // Use Panic Stack for Double/Page Faults
+        // Assign IST 1 to Double Fault (8) and Page Fault (14)
+        // This switches stacks on crash, preventing stack overflow loops
+        if (i == 8 || i == 14) ist = 1; 
 
         void* handler = nullptr;
         switch(i) {
@@ -110,6 +113,7 @@ void idt_init() {
         idt_set_gate(i, handler, kernel_cs, 0x8E, ist);
     }
 
+    // IRQs
     for(int i=0; i<16; i++) {
         void* handler = nullptr;
         switch(i) {
@@ -133,16 +137,20 @@ void idt_init() {
         idt_set_gate(32+i, handler, kernel_cs, 0x8E, 0);
     }
 
-    // SYSCALL: 0xEE = Present, Ring 3, 32-bit Gate
+    // SYSCALL
     idt_set_gate(0x80, (void*)isr128, kernel_cs, 0xEE, 0);
 
     asm volatile ("lidt %0" : : "m"(idtr));
     printf("IDT: Initialized.\n");
 }
 
+void idt_reload() {
+    asm volatile ("lidt %0" : : "m"(idtr));
+}
+
 static const char* exception_messages[] = {
     "Division By Zero", "Debug", "NMI", "Breakpoint", "Overflow", "Bound Range", "Invalid Opcode", "No Device",
-    "Double Fault", "Coprocessor Seg", "Bad TSS", "Segment Not Present", "Stack Fault", "GP Fault", "Page Fault", "Unknown",
+    "DOUBLE FAULT", "Coprocessor Seg", "Bad TSS", "Segment Not Present", "Stack Fault", "GP Fault", "Page Fault", "Unknown",
     "x87 Fault", "Alignment Check", "Machine Check", "SIMD Fault", "Virtualization", "Reserved", "Reserved", "Reserved",
     "Reserved", "Reserved", "Reserved", "Reserved", "Reserved", "Reserved", "Security", "Reserved"
 };
@@ -150,6 +158,14 @@ static const char* exception_messages[] = {
 extern "C" void exception_handler(InterruptFrame* frame) {
     asm volatile("cli");
     
+    // --- SPECIAL DOUBLE FAULT HANDLER ---
+    if (frame->int_number == 8) {
+        // Bypass renderer class, write red directly to framebuffer
+        raw_panic_screen(0xFF0000); // RED
+        while(1) asm("hlt");
+    }
+    // ------------------------------------
+
     if (g_renderer) {
         g_renderer->clear(0x0000AA); 
         
@@ -188,6 +204,36 @@ extern "C" void exception_handler(InterruptFrame* frame) {
             g_renderer->drawString(x, y, buf, 0xFFFF00, scale);
             y += 30;
         }
+
+        // --- CODE DUMP FEATURE ---
+        y += 30;
+        g_renderer->drawString(x, y, "Code Bytes [RIP-10 .. RIP+10]:", 0xFFA500, scale);
+        y += 20;
+
+        uint8_t* ip = (uint8_t*)frame->rip;
+        int dump_x = x;
+        const char* hex_map = "0123456789ABCDEF";
+
+        // Try to dump 20 bytes surrounding RIP
+        for(int i = -10; i < 10; i++) {
+            // Safety check: Don't read NULL or extremely low memory 
+            // if RIP is somehow garbage (avoids nested fault loop)
+            if ((uint64_t)(ip + i) < 0x1000) continue;
+
+            uint8_t b = ip[i];
+            char byte_str[4];
+            byte_str[0] = hex_map[(b >> 4) & 0xF];
+            byte_str[1] = hex_map[b & 0xF];
+            byte_str[2] = ' ';
+            byte_str[3] = 0;
+
+            // Highlight the byte AT RIP in Red, others in White
+            uint32_t color = (i == 0) ? 0xFF0000 : 0xFFFFFF;
+            g_renderer->drawString(dump_x, y, byte_str, color, scale);
+            dump_x += (3 * 8 * scale); // 2 chars + space
+        }
+        y += 30;
+        // -------------------------
 
         g_renderer->drawString(x, y+20, "System Halted. Please reboot.", 0xCCCCCC, scale);
     } 

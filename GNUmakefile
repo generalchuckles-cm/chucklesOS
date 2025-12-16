@@ -34,9 +34,9 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
 		$(QEMUFLAGS) \
-		-monitor stdio -no-reboot -enable-kvm   -drive id=disk0,if=none,file=disk.img,format=raw \
+		-monitor stdio -D cpu.log -no-reboot -enable-kvm -drive id=disk0,if=none,file=disk.img,format=raw \
   -device ahci,id=ahci \
-  -device ide-hd,drive=disk0,bus=ahci.0
+  -device ide-hd,drive=disk0,bus=ahci.0 -m 2G -smp 3
 
 .PHONY: run-hdd-x86_64
 run-hdd-x86_64: edk2-ovmf $(IMAGE_NAME).hdd

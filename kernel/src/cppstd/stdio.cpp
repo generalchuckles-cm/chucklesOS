@@ -1,7 +1,10 @@
 #include "stdio.h"
 #include "../globals.h"
+#include "../sys/spinlock.h"
 #include <stdarg.h>
 #include <cstddef>
+
+static Spinlock stdio_lock;
 
 static int itoa(unsigned long long value, char* str, int base) {
     if (base < 2 || base > 36) {
@@ -14,8 +17,8 @@ static int itoa(unsigned long long value, char* str, int base) {
     char tmp_char;
     int len = 0;
 
-    // Safety buffer limit
-    if (value > 0xFFFFFFFFFFFFFFFFULL - 1) value = 0; 
+    // Safety buffer limit check not strictly needed with 64-bit logic below
+    // if (value > 0xFFFFFFFFFFFFFFFFULL - 1) value = 0; 
 
     if (value == 0) {
         *str++ = '0';
@@ -31,6 +34,7 @@ static int itoa(unsigned long long value, char* str, int base) {
     }
     *ptr = '\0';
 
+    // Reverse string
     ptr--;
     while (ptr1 < ptr) {
         tmp_char = *ptr;
@@ -49,6 +53,7 @@ void putchar(char c) {
 }
 
 void puts(const char* str) {
+    ScopedLock lock(stdio_lock);
     if (g_console && str) {
         g_console->print(str);
         g_console->putChar('\n');
@@ -56,6 +61,8 @@ void puts(const char* str) {
 }
 
 void printf(const char* format, ...) {
+    ScopedLock lock(stdio_lock);
+
     if (!g_console || !format) return;
 
     va_list args;
@@ -65,7 +72,7 @@ void printf(const char* format, ...) {
         if (*format == '%') {
             format++;
             
-            // SKIP FLAGS AND LENGTH MODIFIERS (l, ll, h, z, etc.)
+            // Skip flags
             while ((*format >= '0' && *format <= '9') || 
                    *format == '.' || *format == 'l' || 
                    *format == 'h' || *format == 'z') {
@@ -87,7 +94,7 @@ void printf(const char* format, ...) {
                 }
                 case 'd':
                 case 'i': {
-                    int val = va_arg(args, int);
+                    long long val = va_arg(args, long long);
                     if (val < 0) {
                         putchar('-');
                         val = -val;
@@ -98,9 +105,9 @@ void printf(const char* format, ...) {
                     break;
                 }
                 case 'u': {
-                    unsigned int val = va_arg(args, unsigned int);
+                    unsigned long long val = va_arg(args, unsigned long long);
                     char buffer[32];
-                    itoa((unsigned long long)val, buffer, 10);
+                    itoa(val, buffer, 10);
                     g_console->print(buffer);
                     break;
                 }
@@ -155,7 +162,7 @@ int sprintf(char* str, const char* format, ...) {
                 }
                 case 'd':
                 case 'i': {
-                    int val = va_arg(args, int);
+                    long long val = va_arg(args, long long);
                     if (val < 0) {
                         *str++ = '-';
                         val = -val;
@@ -166,12 +173,13 @@ int sprintf(char* str, const char* format, ...) {
                     break;
                 }
                 case 'u': {
-                    unsigned int val = va_arg(args, unsigned int);
+                    unsigned long long val = va_arg(args, unsigned long long);
                     char buffer[32];
-                    int len = itoa((unsigned long long)val, buffer, 10);
+                    int len = itoa(val, buffer, 10);
                     for (int i=0; i<len; i++) *str++ = buffer[i];
                     break;
                 }
+                case 'p': // FIXED: Added case p
                 case 'x': {
                     unsigned long long val = va_arg(args, unsigned long long);
                     *str++ = '0'; *str++ = 'x';

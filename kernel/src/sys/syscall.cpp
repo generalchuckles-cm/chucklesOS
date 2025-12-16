@@ -7,6 +7,7 @@
 #include "../io.h"
 #include "../memory/heap.h"
 #include "../fs/fat32.h"
+#include "../drv/storage/ahci.h"
 
 // Defined in interrupts.asm
 extern "C" void restore_kernel_stack();
@@ -15,11 +16,15 @@ extern int g_sata_port;
 extern "C" void cpp_syscall_handler(uint64_t syscall_id, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
     switch (syscall_id) {
         case SYS_EXIT:
+            // Return to kernel context saved in interrupts.asm
             sti(); 
             restore_kernel_stack();
             break;
 
         case SYS_PRINT:
+            // arg1 = string pointer (Virtual Address in User Space)
+            // Since we map user space into the current page table (or identity map),
+            // and we are in Ring 0, we can access this pointer directly.
             if (arg1) printf((const char*)arg1, arg2, arg3);
             break;
 

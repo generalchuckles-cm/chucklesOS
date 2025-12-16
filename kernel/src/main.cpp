@@ -22,16 +22,27 @@
 #include "drv/usb/xhci.h" 
 #include "drv/storage/ahci.h"
 #include "fs/fat32.h"
+#include "smp/smp.h" 
+#include "sys/system_stats.h" 
+#include "sys/raw_panic.h" 
+#include "timer.h"
 
-// NEW HEADERS
 #include "drv/input/elan_touch.h"
-
-// Window Manager Includes
 #include "gui/window.h"
 #include "apps/terminal.h"
+#include "apps/display_settings.h"
 
 Console* g_console = nullptr;
 Renderer* g_renderer = nullptr;
+
+DisplaySettings g_display_settings = { MODE_32BIT, 0, 0, false };
+
+void (*g_ui_update_callback)() = nullptr;
+
+volatile uint32_t* g_raw_fb_addr = nullptr;
+volatile uint32_t g_raw_fb_width = 0;
+volatile uint32_t g_raw_fb_height = 0;
+volatile uint32_t g_raw_fb_pitch = 0;
 
 bool g_sniffer_mode = false;
 volatile bool g_sniffer_dirty = false;
@@ -70,14 +81,6 @@ namespace {
 
 namespace { void hcf() { for (;;) { asm ("hlt"); } } }
 
-extern "C" {
-    int __cxa_atexit(void (*)(void *), void *, void *) { return 0; }
-    void __cxa_pure_virtual() { hcf(); }
-    void *__dso_handle;
-    int __cxa_guard_acquire(int64_t *guard) { volatile char *i = (volatile char *)guard; return *i == 0; }
-    void __cxa_guard_release(int64_t *guard) { volatile char *i = (volatile char *)guard; *i = 1; }
-}
-
 extern void (*__init_array[])();
 extern void (*__init_array_end[])();
 
@@ -91,6 +94,16 @@ static void enable_sse() {
     asm volatile ("mov %0, %%cr4" :: "r"(cr4));
 }
 
+static void kernel_ui_update_wrapper() {
+    if (g_renderer) {
+        // SAFETY: Disable I2C Polling to prevent hanging on emulators
+        // ElanTouchpad::getInstance().poll();
+        
+        WindowManager::getInstance().update();
+        WindowManager::getInstance().render(g_renderer);
+    }
+}
+
 extern "C" void kmain() {
     enable_sse();
     if (LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision) == false) hcf();
@@ -99,52 +112,69 @@ extern "C" void kmain() {
 
     limine_framebuffer *framebuffer = framebuffer_request.response->framebuffers[0];
     
+    g_raw_fb_addr = (volatile uint32_t*)framebuffer->address;
+    g_raw_fb_width = framebuffer->width;
+    g_raw_fb_height = framebuffer->height;
+    g_raw_fb_pitch = framebuffer->pitch;
+
     pmm_init(); 
     vmm_init(); 
     heap_init(); 
     gdt_init(); 
     idt_init();
 
-    // Global Renderer (for WM to use)
-    Renderer renderer(framebuffer, g_zap_font); 
-    g_renderer = &renderer;
+    g_renderer = new Renderer(framebuffer, g_zap_font); 
+    g_console = new Console(g_renderer);
 
-    // Boot Console (temporary)
-    Console console(&renderer);
-    g_console = &console;
-
-    // --- Hardware Init ---
     pic_init();
-    ps2_init();       // Keyboard
-    ps2_mouse_init(); // PS/2 Mouse
+    ps2_init();       
+    SystemStats::getInstance().service_ps2_active = true;
     
-    // Initialize I2C and Elan Touchpad
-    ElanTouchpad::getInstance().init();
+    ps2_mouse_init(); 
+    // ElanTouchpad::getInstance().init(); // Disabled for stability
 
     asm volatile ("sti");
     g_using_interrupts = true; 
 
+    smp_init();
+
     if (AhciDriver::getInstance().init()) {
+        SystemStats::getInstance().service_ahci_active = true;
         g_sata_port = AhciDriver::getInstance().findFirstSataPort();
         if (g_sata_port != -1) Fat32::getInstance().init(g_sata_port);
     }
     
-    // --- Window Manager Start ---
-    WindowManager::getInstance().init(renderer.getWidth(), renderer.getHeight());
+    WindowManager::getInstance().init(g_renderer->getWidth(), g_renderer->getHeight());
+    g_ui_update_callback = kernel_ui_update_wrapper;
     
-    // Create the first Terminal Window
     TerminalApp* shell_app = new TerminalApp();
     Window* shell_win = new Window(100, 100, 600, 400, "Terminal", shell_app);
     WindowManager::getInstance().add_window(shell_win);
 
-    // Main Loop
+    printf("Kernel: Entering Main Loop...\n");
+    
+    // Initial Render
+    WindowManager::getInstance().render(g_renderer);
+
+    // Frame Limiter Variables
+    uint64_t last_tick = rdtsc_serialized();
+    uint64_t cpu_freq = get_cpu_frequency();
+    if (cpu_freq == 0) cpu_freq = 2000000000; // Fallback
+    uint64_t ticks_per_frame = cpu_freq / 60; // 60 FPS
+
     while (true) {
+        // Non-blocking Input Check (PS/2 Buffer)
         check_input_hooks(); 
+        SystemStats::getInstance().cpu_ticks[0]++;
         
-        // Poll Touchpad
-        ElanTouchpad::getInstance().poll();
-        
-        WindowManager::getInstance().update();
-        WindowManager::getInstance().render(g_renderer);
+        // Frame Limiter
+        uint64_t now = rdtsc_serialized();
+        if (now - last_tick >= ticks_per_frame) {
+            last_tick = now;
+            // Force UI update at 60Hz
+            kernel_ui_update_wrapper();
+        } else {
+            asm volatile("pause");
+        }
     }
-}
+}   

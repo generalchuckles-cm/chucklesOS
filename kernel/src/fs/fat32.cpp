@@ -8,11 +8,14 @@
 static void* dma_alloc(size_t pages) {
     void* phys = pmm_alloc(pages);
     if (!phys) return nullptr;
+    // Assume HHDM is set in pmm.cpp global
+    extern uint64_t g_hhdm_offset;
     return (void*)((uint64_t)phys + g_hhdm_offset);
 }
 
 static void dma_free(void* virt, size_t pages) {
     if (!virt) return;
+    extern uint64_t g_hhdm_offset;
     uint64_t phys = (uint64_t)virt - g_hhdm_offset;
     pmm_free((void*)phys, pages);
 }
@@ -31,7 +34,6 @@ uint32_t Fat32::cluster_to_lba(uint32_t cluster) {
     return data_start_lba + ((cluster - 2) * bpb.sectors_per_cluster);
 }
 
-// --- HELPER: FAT Table Lookup ---
 uint32_t Fat32::get_next_cluster(uint32_t cluster) {
     uint32_t fat_offset = cluster * 4;
     uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
@@ -68,7 +70,6 @@ void Fat32::set_next_cluster(uint32_t cluster, uint32_t next) {
     dma_free(buf, 1);
 }
 
-// --- HELPER: Find Free Cluster ---
 uint32_t Fat32::allocate_cluster() {
     uint8_t* buf = (uint8_t*)dma_alloc(1);
     if (!buf) return 0;
@@ -78,24 +79,20 @@ uint32_t Fat32::allocate_cluster() {
         uint32_t* table = (uint32_t*)buf;
         
         for (int j = 0; j < 128; j++) {
-             if (i == 0 && j < 2) continue; // Reserved entries
+             if (i == 0 && j < 2) continue; 
 
              if ((table[j] & 0x0FFFFFFF) == FAT32_ENTRY_FREE) {
                  uint32_t cluster = (i * 128) + j;
                  
-                 // Mark as End of Chain
                  table[j] = FAT32_ENTRY_EOC;
                  
-                 // Write updated FAT
                  for (int f = 0; f < bpb.fat_count; f++) {
                      AhciDriver::getInstance().write(port_index, fat_start_lba + i + (f * sectors_per_fat), 1, buf);
                  }
                  
-                 // Zero out the actual data cluster
                  uint8_t* zero = (uint8_t*)dma_alloc(1); 
                  if (zero) {
                      memset(zero, 0, 4096);
-                     // Note: Assumes 4KB cluster (8 sectors). 
                      AhciDriver::getInstance().write(port_index, cluster_to_lba(cluster), bpb.sectors_per_cluster, zero);
                      dma_free(zero, 1);
                  }
@@ -131,15 +128,13 @@ void Fat32::to_dos_filename(const char* input, char* dest_name, char* dest_ext) 
     }
 }
 
-// --- INIT ---
 bool Fat32::init(int port) {
     port_index = port;
     uint8_t* buf = (uint8_t*)dma_alloc(1);
     if (!buf) { printf("FAT32: OOM\n"); return false; }
     
-    // Read BPB (Sector 0)
     if (!AhciDriver::getInstance().read(port, 0, 1, buf)) {
-        printf("FAT32: Read Error on Port %d (Is AHCI Init?)\n", port);
+        printf("FAT32: Read Error on Port %d\n", port);
         dma_free(buf, 1); 
         return false;
     }
@@ -147,9 +142,7 @@ bool Fat32::init(int port) {
     memcpy(&bpb, buf, sizeof(Fat32BootSector));
     dma_free(buf, 1);
 
-    // Validation: 0x29 sig AND 512 byte sectors
     if (bpb.boot_signature != 0x29 || bpb.bytes_per_sector != 512) {
-        // Corrected format string to avoid double 0x0x
         printf("FAT32: Invalid Sig (%x) or Sector Size (%d)\n", bpb.boot_signature, bpb.bytes_per_sector);
         return false;
     }
@@ -164,7 +157,6 @@ bool Fat32::init(int port) {
     return true;
 }
 
-// --- FORMAT ---
 bool Fat32::format(int port, uint32_t size_sectors) {
     printf("FAT32: Formatting Port %d (%d sectors)...\n", port, size_sectors);
     
@@ -192,11 +184,10 @@ bool Fat32::format(int port, uint32_t size_sectors) {
     memcpy(new_bpb->fs_type, "FAT32   ", 8);
     new_bpb->volume_id = 0xCAFEBABE;
 
-    // === CRITICAL FIX: Save values before buffer reuse ===
+    // SAVE CRITICAL VALUES before we repurpose the buffer
     uint32_t saved_reserved = new_bpb->reserved_sectors;
     uint32_t saved_sectors_fat = new_bpb->sectors_per_fat_32;
     uint32_t saved_fat_count = new_bpb->fat_count;
-    // ===================================================
 
     // 1. Write BPB
     if (!AhciDriver::getInstance().write(port, 0, 1, buf)) {
@@ -204,7 +195,7 @@ bool Fat32::format(int port, uint32_t size_sectors) {
         dma_free(buf, 1); return false;
     }
 
-    // 2. Write FSInfo (Reuses buf, zeroing previous data)
+    // 2. Write FSInfo
     memset(buf, 0, 512);
     FSInfo* info = (FSInfo*)buf;
     info->lead_sig = 0x41615252;
@@ -217,7 +208,6 @@ bool Fat32::format(int port, uint32_t size_sectors) {
     dma_free(buf, 1);
 
     // 3. ZERO OUT FAT TABLES
-    // Use saved values, NOT new_bpb->...
     uint32_t fat_total_sectors = saved_sectors_fat * saved_fat_count;
     uint32_t fat_start = saved_reserved;
     
@@ -238,14 +228,11 @@ bool Fat32::format(int port, uint32_t size_sectors) {
             dma_free(big_buf, 16);
             return false;
         }
-        
-        // Progress Indicator
-        if ((i % 2048) == 0) printf("."); 
     }
     printf(" Done.\n");
     dma_free(big_buf, 16);
 
-    // 4. Init FAT Headers (Reserved Entries)
+    // 4. Init FAT Headers
     buf = (uint8_t*)dma_alloc(1);
     memset(buf, 0, 512);
     uint32_t* fat_table = (uint32_t*)buf;
@@ -253,14 +240,13 @@ bool Fat32::format(int port, uint32_t size_sectors) {
     fat_table[1] = 0xFFFFFFFF;
     fat_table[2] = 0x0FFFFFFF; // Root Dir EOF
     
-    // Use saved_reserved and saved_sectors_fat here too!
     AhciDriver::getInstance().write(port, saved_reserved, 1, buf);
     AhciDriver::getInstance().write(port, saved_reserved + saved_sectors_fat, 1, buf);
 
     // 5. Zero Root Directory
     uint32_t data_start = saved_reserved + (saved_fat_count * saved_sectors_fat);
-    memset(buf, 0, 4096); // Clear Buffer
-    AhciDriver::getInstance().write(port, data_start, 8, buf); // 8 sectors = 1 cluster (4KB)
+    memset(buf, 0, 4096); 
+    AhciDriver::getInstance().write(port, data_start, 8, buf); 
 
     dma_free(buf, 1);
     printf("FAT32: Format complete.\n");
@@ -357,10 +343,7 @@ bool Fat32::read_file(const char* filename, void* buffer, uint32_t buffer_len) {
 
     FatDirectoryEntry entry;
     uint32_t cluster = find_entry(filename, &entry, nullptr, nullptr);
-    if (cluster == 0) {
-        printf("FAT32: File not found.\n");
-        return false;
-    }
+    if (cluster == 0) return false;
 
     if (entry.file_size > buffer_len) {
         printf("FAT32: Buffer too small.\n");
@@ -387,15 +370,8 @@ bool Fat32::read_file(const char* filename, void* buffer, uint32_t buffer_len) {
 }
 
 bool Fat32::create_file(const char* filename) {
-    if (!mounted) {
-        printf("Error: File system not mounted.\n");
-        return false;
-    }
-
-    if (find_entry(filename, nullptr, nullptr, nullptr) != 0) {
-        printf("FAT32: File exists.\n");
-        return false;
-    }
+    if (!mounted) return false;
+    if (find_entry(filename, nullptr, nullptr, nullptr) != 0) return false;
 
     FatDirectoryEntry new_ent;
     memset(&new_ent, 0, 32);

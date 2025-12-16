@@ -2,16 +2,14 @@
 #include "cppstd/math.h"
 #include "cppstd/sse.h"
 #include "cppstd/stdio.h"
+#include "cppstd/string.h" // for memcpy
 
 static int iabs(int v) { return v < 0 ? -v : v; }
 
 Renderer::Renderer(limine_framebuffer* framebuffer, const void* psf_font) 
     : fb(framebuffer), width(framebuffer->width), height(framebuffer->height), 
       pitch(framebuffer->pitch), bpp(framebuffer->bpp) {
-    
     font_header = (PSF1_Header*)psf_font;
-    
-    // The glyphs start immediately after the header
     glyph_buffer = (const uint8_t*)psf_font + sizeof(PSF1_Header);
 }
 
@@ -28,27 +26,17 @@ void Renderer::drawRect(int x, int y, int w, int h, std::uint32_t color) {
     if (y + h > (int)height) h = (int)height - y;
     if (w <= 0 || h <= 0) return;
 
-    // Use SSE to fill rects
     for (int i = 0; i < h; i++) {
         std::uint8_t* row_start = (std::uint8_t*)fb->address + ((y + i) * pitch) + (x * 4);
         int pixels_remaining = w;
         int p_off = 0;
 
-        // 1. Align to 16 bytes (optional, but good practice)
-        while (pixels_remaining > 0 && ((uint64_t)(row_start + p_off * 4) & 0xF) != 0) {
-            *(uint32_t*)(row_start + p_off * 4) = color;
-            p_off++;
-            pixels_remaining--;
-        }
-
-        // 2. Fast SSE Block Write (4 pixels at a time)
+        // Use Store Unaligned to prevent GP Faults on odd coordinates
         while (pixels_remaining >= 4) {
-            _sse_store_128(row_start + p_off * 4, color);
+            _sse_storeu_128(row_start + p_off * 4, color);
             p_off += 4;
             pixels_remaining -= 4;
         }
-
-        // 3. Cleanup leftovers
         while (pixels_remaining > 0) {
             *(uint32_t*)(row_start + p_off * 4) = color;
             p_off++;
@@ -74,24 +62,19 @@ void Renderer::drawLine(int x0, int y0, int x1, int y1, std::uint32_t color) {
 
 void Renderer::drawFilledCircle(int cx, int cy, int radius, std::uint32_t color) {
     int r2 = radius * radius;
-    
     for (int y = -radius; y <= radius; y++) {
         int target_y = cy + y;
         if (target_y < 0 || target_y >= (int)height) continue;
-
         int span_width = (int)sqrt((float)(r2 - y*y));
         int start_x = cx - span_width;
         int end_x = cx + span_width;
-
         if (start_x < 0) start_x = 0;
         if (end_x >= (int)this->width) end_x = (int)this->width - 1;
         if (start_x > end_x) continue;
 
-        // USE SSE HERE TOO
         std::uint8_t* row_start = (std::uint8_t*)fb->address + (target_y * pitch) + (start_x * 4);
         int pixels = end_x - start_x + 1;
         int p_off = 0;
-
         while (pixels >= 4) {
             _sse_storeu_128(row_start + p_off * 4, color);
             p_off += 4;
@@ -106,36 +89,20 @@ void Renderer::drawFilledCircle(int cx, int cy, int radius, std::uint32_t color)
 }
 
 void Renderer::clear(std::uint32_t color) {
-    bool contiguous = (pitch == width * 4);
-    
-    if (contiguous) {
-        std::size_t total_pixels = width * height;
-        std::uint8_t* ptr = (std::uint8_t*)fb->address;
-        
-        while (total_pixels >= 4) {
-            _sse_storeu_128(ptr, color);
-            ptr += 16; 
-            total_pixels -= 4;
+    for (std::uint32_t y = 0; y < height; y++) {
+        std::uint8_t* row = (std::uint8_t*)fb->address + (y * pitch);
+        int pixels = width;
+        // Optimization: Use SSE for clearing
+        int p_off = 0;
+        while (pixels >= 4) {
+            _sse_storeu_128(row + p_off * 4, color);
+            p_off += 4;
+            pixels -= 4;
         }
-        while (total_pixels > 0) {
-            *(uint32_t*)ptr = color;
-            ptr += 4;
-            total_pixels--;
-        }
-    } else {
-        for (std::uint32_t y = 0; y < height; y++) {
-            std::uint8_t* row = (std::uint8_t*)fb->address + (y * pitch);
-            int pixels = width;
-            while (pixels >= 4) {
-                _sse_storeu_128(row, color);
-                row += 16;
-                pixels -= 4;
-            }
-            while (pixels > 0) {
-                *(uint32_t*)row = color;
-                row += 4;
-                pixels--;
-            }
+        while (pixels > 0) {
+            *(uint32_t*)(row + p_off * 4) = color;
+            p_off++;
+            pixels--;
         }
     }
 }
@@ -143,16 +110,12 @@ void Renderer::clear(std::uint32_t color) {
 void Renderer::drawChar(int x, int y, char c, std::uint32_t color, int scale) {
     unsigned char uc = (unsigned char)c;
     const uint8_t* glyph = glyph_buffer + (uc * font_header->charsize);
-
     for (int row = 0; row < font_header->charsize; row++) {
         uint8_t bits = glyph[row];
         for (int col = 0; col < 8; col++) {
             if ((bits >> (7 - col)) & 1) {
-                if (scale == 1) {
-                    putPixel(x + col, y + row, color);
-                } else {
-                    drawRect(x + (col * scale), y + (row * scale), scale, scale, color);
-                }
+                if (scale == 1) putPixel(x + col, y + row, color);
+                else drawRect(x + (col * scale), y + (row * scale), scale, scale, color);
             }
         }
     }
@@ -163,7 +126,6 @@ void Renderer::drawString(int x, int y, const char* str, std::uint32_t color, in
     int cursor_y = y;
     int font_w = 8 * scale;
     int font_h = font_header->charsize * scale;
-
     while (*str) {
         if (*str == '\n') {
             cursor_x = x;
@@ -176,7 +138,6 @@ void Renderer::drawString(int x, int y, const char* str, std::uint32_t color, in
     }
 }
 
-// 24-bit RGB Source
 void Renderer::renderBitmap(int x_start, int y_start, int w, int h, const std::uint8_t* data) {
     std::uint8_t* fb_addr = static_cast<std::uint8_t*>(fb->address);
     for (int y = 0; y < h; y++) {
@@ -193,23 +154,45 @@ void Renderer::renderBitmap(int x_start, int y_start, int w, int h, const std::u
     }
 }
 
-// 32-bit ARGB Source (Direct Blit)
 void Renderer::renderBitmap32(int x_start, int y_start, int w, int h, const std::uint32_t* data) {
+    // FIX: Using non-volatile pointer and memcpy for speed.
+    // The previous volatile loop was causing the "Freezing" feel.
     std::uint8_t* fb_addr = static_cast<std::uint8_t*>(fb->address);
+    if (!data) return;
+
     for (int y = 0; y < h; y++) {
         int target_y = y_start + y;
         if (target_y < 0 || target_y >= (int)height) continue;
         
-        volatile std::uint32_t* row_ptr = (volatile std::uint32_t*)(fb_addr + (target_y * pitch));
+        // Destination: Framebuffer line
+        void* dst_ptr = (void*)(fb_addr + (target_y * pitch));
         
-        // Use a simpler copy loop or memcpy for speed
-        for (int x = 0; x < w; x++) {
-            int target_x = x_start + x;
-            if (target_x < 0 || target_x >= (int)width) continue;
-            
-            // Source is simply 32-bit to 32-bit copy
-            row_ptr[target_x] = data[y * w + x];
+        // Source: Buffer line
+        const void* src_ptr = (const void*)(data + (y * w));
+        
+        // Calculate bounds
+        int draw_x = x_start;
+        int width_to_draw = w;
+        
+        if (draw_x < 0) {
+            // Clip left
+            src_ptr = (const void*)((const uint32_t*)src_ptr + (-draw_x));
+            width_to_draw += draw_x;
+            draw_x = 0;
         }
+        
+        if (draw_x + width_to_draw > (int)width) {
+            // Clip right
+            width_to_draw = (int)width - draw_x;
+        }
+
+        if (width_to_draw <= 0) continue;
+
+        // Adjust Dest Ptr to X offset
+        dst_ptr = (void*)((uint32_t*)dst_ptr + draw_x);
+
+        // Fast Block Copy
+        memcpy(dst_ptr, src_ptr, width_to_draw * 4);
     }
 }
 
@@ -228,4 +211,4 @@ void Renderer::renderBitmapColored(int x_start, int y_start, int w, int h, const
             } 
         }
     }
-}   
+}

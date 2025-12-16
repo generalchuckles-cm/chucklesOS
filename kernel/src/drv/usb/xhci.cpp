@@ -9,6 +9,7 @@
 #include "../../input.h" 
 #include "../../interrupts/pic.h"
 #include "../../globals.h"
+#include "../../sys/system_stats.h" // Stats
 
 #define XHCI_VIRT_BASE 0xFFFFA00000000000ULL
 
@@ -21,7 +22,7 @@ XhciDriver& XhciDriver::getInstance() {
 }
 
 static void* alloc_aligned(size_t size, size_t alignment) {
-    (void)alignment; // PMM gives 4096 alignment, which covers 16, 32, 64 requirements
+    (void)alignment; 
     size_t pages = (size + 4095) / 4096;
     void* phys = pmm_alloc(pages);
     if (!phys) return nullptr;
@@ -31,8 +32,6 @@ static void* alloc_aligned(size_t size, size_t alignment) {
 static uint64_t get_phys(void* virt) {
     return (uint64_t)virt - g_hhdm_offset;
 }
-
-// --- Register Access ---
 
 void XhciDriver::write_op_reg(uint32_t offset, uint32_t val) {
     *(volatile uint32_t*)(op_regs_base + offset) = val;
@@ -83,60 +82,48 @@ void XhciDriver::perform_bios_handoff() {
     }
 }
 
-// --- COMMAND RING HELPERS ---
-
 void XhciDriver::queue_trb(void* ring_base, uint64_t& enqueue_offset, uint32_t& cycle, uint64_t param, uint32_t status, uint32_t control) {
     XhciTrb* trb = (XhciTrb*)((uint64_t)ring_base + enqueue_offset);
     
     trb->param = param;
     trb->status = status;
-    trb->control = control | (cycle & 1); // Set Cycle Bit
+    trb->control = control | (cycle & 1); 
     
     enqueue_offset += 16;
     
-    // Simple ring wrap handling
     if (enqueue_offset >= 4096 - 16) { 
-        // For this bootloader-style driver, we assume we won't wrap ring during init.
-        // If we do, we'd need a Link TRB.
         enqueue_offset = 0;
         cycle ^= 1;
     }
 }
 
 int XhciDriver::send_command_and_wait(uint32_t type, uint64_t param1, uint32_t param2) {
-    // 1. Queue the TRB
     queue_trb(cmd_ring_base, cmd_ring_enqueue_ptr, cmd_ring_cycle, param1, param2, (type << 10));
     
-    // 2. Ring Doorbell (Target 0 = Host Controller)
     ring_doorbell(0, 0);
     
-    // 3. Poll Event Ring for Completion
-    uint64_t timeout = 1000; // 1 second timeout
+    uint64_t timeout = 1000; 
     while(timeout--) {
         XhciEventTrb* evt = (XhciEventTrb*)event_ring_dequeue_ptr;
         
-        // Check if Cycle bit matches
         if ((evt->control & 1) == event_ring_cycle) {
             uint32_t trb_type = (evt->control >> 10) & 0x3F;
             
-            // Advance Ring
             event_ring_dequeue_ptr = (void*)((uint64_t)event_ring_dequeue_ptr + 16);
             
             uint64_t erdp_val = get_phys(event_ring_dequeue_ptr);
             *(volatile uint32_t*)(run_regs_base + XHCI_ERDP(0)) = (uint32_t)erdp_val | 8; 
             *(volatile uint32_t*)(run_regs_base + XHCI_ERDP(0) + 4) = (uint32_t)(erdp_val >> 32);
 
-            // Clear IP
             uint32_t iman = *(volatile uint32_t*)(run_regs_base + XHCI_IMAN(0));
             if (iman & 1) *(volatile uint32_t*)(run_regs_base + XHCI_IMAN(0)) = iman | 1;
 
             if (trb_type == TRB_CMD_COMPLETION) {
                 uint32_t completion_code = (evt->status >> 24) & 0xFF;
-                if (completion_code != 1) { // 1 = Success
+                if (completion_code != 1) { 
                     printf("XHCI: Cmd Failed (Code %d)\n", completion_code);
                     return -1;
                 }
-                // Return Slot ID
                 return (evt->control >> 24) & 0xFF;
             }
         }
@@ -146,12 +133,9 @@ int XhciDriver::send_command_and_wait(uint32_t type, uint64_t param1, uint32_t p
     return -1;
 }
 
-// --- ENUMERATION ---
-
 void XhciDriver::enumerate_device(int port_id) {
     printf("XHCI: Enumerating Port %d...\n", port_id);
     
-    // 1. Enable Slot
     int slot_id = send_command_and_wait(TRB_ENABLE_SLOT, 0, 0);
     if (slot_id < 0) return;
     
@@ -161,7 +145,6 @@ void XhciDriver::enumerate_device(int port_id) {
     dev->slot_id = slot_id;
     dev->port_id = port_id;
     
-    // 2. Alloc Contexts
     dev->output_ctx = alloc_aligned(context_size_bytes * 32, 64);
     dcbaa[slot_id] = get_phys(dev->output_ctx);
     
@@ -172,29 +155,22 @@ void XhciDriver::enumerate_device(int port_id) {
     dev->ep0_enqueue_ptr = 0;
     dev->ep0_cycle = 1;
     
-    // 3. Fill Input Context
     uint8_t* icc = (uint8_t*)dev->input_ctx; 
     uint8_t* sc = icc + context_size_bytes;  
     uint8_t* ep0 = sc + context_size_bytes;  
     
-    // ICC: Add Slot(0) and EP0(1)
     *(uint32_t*)(icc + 4) = 0x3; 
     
-    // Slot Context
     uint32_t portsc = read_port_reg(port_id, 0);
     uint32_t speed = (portsc >> 10) & 0xF;
     
-    // Context Entries=1, Speed, Root Hub Port Number
     *(uint32_t*)(sc) = (1 << 27) | (speed << 20);
-    *(uint32_t*)(sc + 4) = (port_id << 16); // Must be 1-based port index
+    *(uint32_t*)(sc + 4) = (port_id << 16); 
     
-    // EP0 Context
     int max_packet = (speed == 4) ? 512 : 64; 
-    // Type=Control(4), MaxPSize, CErr=3
     *(uint32_t*)(ep0 + 4) = (3 << 1) | (4 << 3) | (max_packet << 16);
     *(uint64_t*)(ep0 + 16) = dev->ep0_ring_phys | 1; 
     
-    // 4. Address Device
     printf("XHCI: Addressing Device...\n");
     int res = send_command_and_wait(TRB_ADDRESS_DEVICE, get_phys(dev->input_ctx), (slot_id << 24));
     if (res != slot_id) {
@@ -203,8 +179,6 @@ void XhciDriver::enumerate_device(int port_id) {
     }
     printf("XHCI: Device Addressed.\n");
     
-    // 5. Read Descriptor (Get Descriptor)
-    // Setup Packet: 80 06 00 01 00 00 12 00
     queue_trb(dev->ep0_ring, dev->ep0_enqueue_ptr, dev->ep0_cycle, 0x0012010000000680UL, 8, 
               (TRB_SETUP_STAGE << 10) | (2 << 16) | (3 << 6)); 
               
@@ -217,7 +191,7 @@ void XhciDriver::enumerate_device(int port_id) {
               
     ring_doorbell(slot_id, 1); 
     
-    sleep_ms(100); // Wait for transfer
+    sleep_ms(100); 
     
     UsbDeviceDescriptor* desc = (UsbDeviceDescriptor*)buffer;
     printf("XHCI: DEVICE IDENTIFIED:\n");
@@ -227,14 +201,11 @@ void XhciDriver::enumerate_device(int port_id) {
     else printf("  Type: Class %d\n", desc->bDeviceClass);
 }
 
-// --- PORT LOGIC (Gemini Lake Safe - NO CLEAR) ---
-
 void XhciDriver::reset_port(int port) {
     printf("XHCI: Resetting port %d...\n", port);
     
     uint32_t sc = read_port_reg(port, 0);
     
-    // 1. Assert Reset (Strict, No Clear)
     uint32_t reset_val = sc;
     reset_val &= ~PORT_CHANGE_MASK;  
     reset_val |= PORT_RESET;         
@@ -242,7 +213,6 @@ void XhciDriver::reset_port(int port) {
     
     write_port_reg(port, 0, reset_val);
     
-    // 2. Wait for reset complete
     int timeout = 150;
     bool reset_completed = false;
     
@@ -251,7 +221,6 @@ void XhciDriver::reset_port(int port) {
         sc = read_port_reg(port, 0);
         
         if (!(sc & PORT_POWER)) {
-            // If power lost, restore it and abort enumeration
             write_port_reg(port, 0, PORT_POWER); 
             return; 
         }
@@ -267,9 +236,8 @@ void XhciDriver::reset_port(int port) {
         return;
     }
     
-    sleep_ms(50); // Stabilize
+    sleep_ms(50); 
     
-    // 3. Check Enable Status
     sc = read_port_reg(port, 0);
     if (sc & PORT_PE) {
         printf("XHCI: Port %d Enabled. Enumerating...\n", port);
@@ -277,8 +245,6 @@ void XhciDriver::reset_port(int port) {
     } else {
         printf("XHCI: Port %d Reset done but NOT enabled. (Status: 0x%x)\n", port, sc);
     }
-    
-    // NOTE: We do NOT clear change bits. Leaving them 1 is safer on this hardware.
 }
 
 void XhciDriver::xhci_port_manager() {
@@ -290,7 +256,6 @@ void XhciDriver::xhci_port_manager() {
         return;
     }
     
-    // PHASE 1: Power on
     bool any_powered = false;
     for (uint32_t i = 1; i <= max_ports; i++) {
         uint32_t sc = read_port_reg(i, 0);
@@ -302,12 +267,10 @@ void XhciDriver::xhci_port_manager() {
     
     if (any_powered) sleep_ms(100);
 
-    // PHASE 2: Reset connected
     for (uint32_t i = 1; i <= max_ports; i++) {
         uint32_t sc = read_port_reg(i, 0);
         if (!(sc & PORT_POWER)) continue; 
         
-        // Only reset if connected
         if ((sc & PORT_CONNECT) && !(sc & PORT_PE)) {
             reset_port(i);
         }
@@ -322,7 +285,6 @@ void XhciDriver::poll_ports() {
         uint32_t changes = sc & PORT_CHANGE_MASK;
         
         if (changes) {
-            // Do not clear bits.
             if ((changes & PORT_CSC) && (sc & PORT_CONNECT)) {
                 if (!(sc & PORT_PE)) {
                     printf("XHCI: Hotplug Port %d\n", i);
@@ -332,8 +294,6 @@ void XhciDriver::poll_ports() {
         }
     }
 }
-
-// ---------------------------------------------
 
 bool XhciDriver::init(uint16_t vendor_id, uint16_t device_id) {
     printf("XHCI: Initializing for Gemini Lake J4125\n");
@@ -363,7 +323,6 @@ dev_found:
 
     pci_enable_bus_mastering(&pci_dev);
     
-    // Unmask Legacy IRQ if valid (though we likely use MSI/Poll)
     if (pci_dev.irq_line > 0 && pci_dev.irq_line < 16) {
         pic_unmask(pci_dev.irq_line);
     }
@@ -407,6 +366,9 @@ dev_found:
     sleep_ms(50);
 
     xhci_port_manager();
+    
+    // UPDATE STATS
+    SystemStats::getInstance().service_xhci_active = true;
     
     return true;
 }
@@ -471,8 +433,6 @@ void XhciDriver::init_memory() {
 }
 
 void XhciDriver::poll_events() {
-    // CRITICAL SAFETY CHECK: If XHCI hasn't been initialized, 
-    // the pointer will be null. Accessing it causes Page Fault 0xE at 0xC.
     if (!event_ring_dequeue_ptr) return;
 
     XhciEventTrb* trb = (XhciEventTrb*)event_ring_dequeue_ptr;
