@@ -6,3 +6,5 @@
 /node_modules/
 /Physical
 
+cpu.log
+cpu.txt
