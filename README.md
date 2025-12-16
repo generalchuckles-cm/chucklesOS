@@ -20,6 +20,16 @@ Window Manager with Windows 98 SE Theme
 PS/2 Keyboard/Mouse support
 MIDI Player (Not really MIDI, but an included tool to convert a MIDI file to H is included. Uses the PC Speaker)
 
+
+Current Functions (12.16.25):
+NES and Text Editor are windowed
+Theme editor
+Display options
+SMP Support (Theoreticlly up to 32 Cores)
+System Stats
+
+
+
 # How to contribute:
 
 1. Click the "Fork" button at the top-right of the chucklesOS repository page.
