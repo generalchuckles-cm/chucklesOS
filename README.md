@@ -3,6 +3,15 @@ This is ChucklesOS, a hobby OS developed by Github user generalchuckles-cm
 The goal of this OS is to make a minimal Linux like experience
 Most features work fine
 
+Minimum Requirements:
+Computer that supports x86_64
+Can techniclly boot on as little as 32MB of RAM
+If it does not boot, you may need to enable XD in your BIOS (though this will be a removed limit soon)
+Tested machines:
+    Intel Pentium Silver N6000, 4GB LPDDR4-2933 - Works fine. No mouse though.
+    Intel Core i5-7400, 24GB DDR4-2133 - Boots, smooth, UEFI and Legacy
+    Intel Core 2 Duo T5750, 3GB DDR2-667 - Also works just fine.
+
 It makes use of the Limine bootloader.
 
 Current Functions (12.14.25):
