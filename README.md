@@ -17,8 +17,6 @@ It makes use of the Limine bootloader.
 Current Functions (12.14.25):
 Full SATA/AHCI Support
 FAT32 Filesystem
-Intel Gemini Lake GPU driver (not super functional lmao)
-Intel xHCI driver for Gemini Lake (It works but I can't get it to work on my Celeron J4125. Up for testing!)
 Bouncing DVD Logo
 Stress Test (relies on intel GPU driver, will not work lol)
 Basic 3D renderer
@@ -27,10 +25,11 @@ NES Emulator (Only Mapper 0 games will work. Mapper 4 games half work but are ve
     ### It plays at intended speed.
 Window Manager with Windows 98 SE Theme
 PS/2 Keyboard/Mouse support
-MIDI Player (Not really MIDI, but an included tool to convert a MIDI file to H is included. Uses the PC Speaker)
 
 
-Current Functions (12.16.25):
+
+Current Functions (05.02.26):
+ChucklesScript much better
 NES and Text Editor are windowed
 Theme editor
 Display options
