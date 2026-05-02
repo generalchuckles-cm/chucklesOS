@@ -5,7 +5,6 @@
 #include "../globals.h"
 #include "../cppstd/stdio.h"
 #include "../cppstd/string.h"
-#include "../drv/usb/xhci.h" 
 #include "../drv/ps2/ps2_mouse.h"
 #include "../drv/net/e1000.h"
 #include "../drv/ps2/ps2_kbd.h"
@@ -253,7 +252,6 @@ extern "C" void irq_handler(InterruptFrame* frame) {
         E1000Driver::getInstance().handle_interrupt();
     }
     
-    if (irq >= 10 && irq <= 15) XhciDriver::getInstance().poll_events();
 
     pic_eoi(irq);
 }

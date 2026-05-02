@@ -6,7 +6,6 @@
 #include "../../gui/window.h"
 #include "../../input.h"
 #include "../../cppstd/stdio.h"
-#include "../../drv/input/elan_touch.h" // Required to keep the mouse moving
 
 static void js_handle_alert(JSContext* ctx, const char* args_cursor) {
     char msg[128];
@@ -44,7 +43,6 @@ static void js_handle_alert(JSContext* ctx, const char* args_cursor) {
         while(true) {
             // A. Poll Hardware
             check_input_hooks();
-            ElanTouchpad::getInstance().poll();
             
             // B. Update Window Manager (Handles Mouse movement and clicking to focus)
             WindowManager::getInstance().update();

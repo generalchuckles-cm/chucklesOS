@@ -61,8 +61,10 @@ void heap_init() {
 }
 
 static void split_block(HeapHeader* block, size_t size) {
-    size_t remaining = block->length - size - sizeof(HeapHeader);
-    if (remaining > 32) {
+    // FIX: Check for underflow by ensuring total block size can 
+    // accommodate requested size + new header + minimum payload.
+    if (block->length >= size + sizeof(HeapHeader) + 32) {
+        size_t remaining = block->length - size - sizeof(HeapHeader);
         HeapHeader* new_split = (HeapHeader*)((uint8_t*)block + sizeof(HeapHeader) + size);
         new_split->length = remaining;
         new_split->is_free = true;
@@ -97,12 +99,7 @@ void* malloc(size_t size) {
     int safety_loop = 0;
 
     while (current) {
-        // FIX: Detect circular loops or infinite walks caused by corruption
-        if (safety_loop++ > 100000) {
-            // Break loop to avoid freeze, return null
-            return nullptr; 
-        }
-
+        if (safety_loop++ > 100000) return nullptr; 
         if (current->magic != HEAP_MAGIC) return nullptr;
 
         if (current->is_free && current->length >= size) {
@@ -172,8 +169,6 @@ size_t heap_get_total() {
     if (heap_end_virt <= HEAP_START_ADDR) return 0;
     return heap_end_virt - HEAP_START_ADDR;
 }
-
-void heap_print_stats() { /* Debug only */ }
 
 void* operator new(size_t size) { return malloc(size); }
 void* operator new[](size_t size) { return malloc(size); }

@@ -8,7 +8,6 @@ struct SystemStats {
     bool service_smp_active;
     bool service_e1000_active;
     bool service_ahci_active;
-    bool service_xhci_active;
     bool service_ps2_active;
     
     // CPU Counters (Updated by cores)
@@ -25,7 +24,6 @@ private:
     SystemStats() : service_smp_active(false), 
                     service_e1000_active(false),
                     service_ahci_active(false),
-                    service_xhci_active(false),
                     service_ps2_active(false),
                     cpu_count(1) {
         for(int i=0; i<32; i++) cpu_ticks[i] = 0;

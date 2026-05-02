@@ -13,13 +13,11 @@
 #include "memory/pmm.h"
 #include "memory/vmm.h"
 #include "memory/heap.h"
-#include "drv/gpu/intel_gpu.h" 
 #include "interrupts/idt.h"
 #include "interrupts/gdt.h" 
 #include "interrupts/pic.h"
 #include "drv/ps2/ps2_kbd.h"
 #include "drv/ps2/ps2_mouse.h"
-#include "drv/usb/xhci.h" 
 #include "drv/storage/ahci.h"
 #include "fs/fat32.h"
 #include "smp/smp.h" 
@@ -27,7 +25,6 @@
 #include "sys/raw_panic.h" 
 #include "timer.h"
 
-#include "drv/input/elan_touch.h"
 #include "gui/window.h"
 #include "apps/terminal.h"
 #include "apps/display_settings.h"
@@ -97,7 +94,6 @@ static void enable_sse() {
 static void kernel_ui_update_wrapper() {
     if (g_renderer) {
         // SAFETY: Disable I2C Polling to prevent hanging on emulators
-        // ElanTouchpad::getInstance().poll();
         
         WindowManager::getInstance().update();
         WindowManager::getInstance().render(g_renderer);
@@ -131,7 +127,6 @@ extern "C" void kmain() {
     SystemStats::getInstance().service_ps2_active = true;
     
     ps2_mouse_init(); 
-    // ElanTouchpad::getInstance().init(); // Disabled for stability
 
     asm volatile ("sti");
     g_using_interrupts = true; 

@@ -1,4 +1,5 @@
 bits 64
+
 extern exception_handler
 extern irq_handler
 extern cpp_syscall_handler
@@ -18,6 +19,7 @@ isr%1:
     jmp isr_common_stub
 %endmacro
 
+; --- Exception ISRs ---
 ISR_NOERRCODE 0
 ISR_NOERRCODE 1
 ISR_NOERRCODE 2
@@ -51,6 +53,7 @@ ISR_NOERRCODE 29
 ISR_ERRCODE   30
 ISR_NOERRCODE 31
 
+; --- IRQ ISRs ---
 ISR_NOERRCODE 32
 ISR_NOERRCODE 33
 ISR_NOERRCODE 34
@@ -68,6 +71,7 @@ ISR_NOERRCODE 45
 ISR_NOERRCODE 46
 ISR_NOERRCODE 47
 
+; --- Syscall Entry (INT 0x80) ---
 global isr128
 isr128:
     push rbp
@@ -95,104 +99,8 @@ isr128:
     pop rbp
     iretq
 
-global jump_to_user_program
-global restore_kernel_stack
+; --- Helper to load GDT ---
 global load_gdt
-global call_kernel_program
-
-section .data
-    saved_kernel_rsp: dq 0
-
-section .text
-
-; --- NEW FUNCTION: Safely call kernel code with exit trap ---
-; void call_kernel_program(void* entry_point)
-call_kernel_program:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    
-    ; 1. Setup Safe Return Address
-    ; We push the label .safe_exit onto the stack.
-    ; If restore_kernel_stack is called, it loads 'saved_kernel_rsp',
-    ; which points here, and then executes RET, which pops .safe_exit.
-    lea rax, [.safe_exit]
-    push rax
-    
-    ; 2. Save this specific stack location
-    mov [saved_kernel_rsp], rsp
-    
-    ; 3. Call the raw binary
-    call rdi
-    
-    ; 4. If program returns normally (ret), it pops the .safe_exit we pushed above.
-    ; So we fall through here.
-    
-.safe_exit:
-    ; Restore environment
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    pop rbp
-    ret
-
-jump_to_user_program:
-    cli  
-    mov [saved_kernel_rsp], rsp
-    
-    mov r12, rdi    ; entry
-    mov r13, rsi    ; argc
-    mov r14, rdx    ; argv
-    mov r15, rcx    ; stack_top
-    
-    mov ax, 0x23
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    
-    push 0x23           ; SS
-    push r15            ; RSP
-    
-    pushfq
-    pop rax
-    or rax, 0x200       ; Enable IF
-    push rax            ; RFLAGS
-    
-    push 0x1B           ; CS
-    push r12            ; RIP
-    
-    mov rdi, r13        ; argc
-    mov rsi, r14        ; argv
-    xor rdx, rdx        
-    
-    xor rax, rax
-    xor rbx, rbx
-    xor rcx, rcx
-    xor rbp, rbp
-    xor r8, r8
-    xor r9, r9
-    xor r10, r10
-    xor r11, r11
-    xor r12, r12
-    xor r13, r13
-    xor r14, r14
-    xor r15, r15
-    
-    iretq
-
-restore_kernel_stack:
-    ; This loads the RSP we saved in call_kernel_program
-    mov rsp, [saved_kernel_rsp]
-    ; Returns to .safe_exit
-    ret
-
 load_gdt:
     lgdt [rdi]
     mov es, dx
@@ -208,6 +116,7 @@ load_gdt:
     ltr cx
     ret
 
+; --- Common ISR Stub ---
 isr_common_stub:
     push r15
     push r14

@@ -59,6 +59,16 @@ void Console::putChar(char c) {
         return;
     }
 
+    // BUG FIX: Handle Tab Characters!
+    if (c == '\t') {
+        // Move forward to the next multiple of 4 spaces
+        int spaces_to_add = 4 - (cursor_x % 4);
+        for (int i = 0; i < spaces_to_add; i++) {
+            putChar(' ');
+        }
+        return;
+    }
+
     renderer->drawChar(cursor_x * font_w * scale, 
                        cursor_y * font_h * scale, 
                        c, fgColor, scale);

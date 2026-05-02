@@ -10,16 +10,10 @@
 #include "../drv/storage/ahci.h"
 
 // Defined in interrupts.asm
-extern "C" void restore_kernel_stack();
 extern int g_sata_port;
 
 extern "C" void cpp_syscall_handler(uint64_t syscall_id, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
     switch (syscall_id) {
-        case SYS_EXIT:
-            // Return to kernel context saved in interrupts.asm
-            sti(); 
-            restore_kernel_stack();
-            break;
 
         case SYS_PRINT:
             // arg1 = string pointer (Virtual Address in User Space)
@@ -69,11 +63,6 @@ extern "C" void cpp_syscall_handler(uint64_t syscall_id, uint64_t arg1, uint64_t
             }
             break;
 
-        case SYS_DISK_WRITE:
-            // arg1=lba, arg2=count, arg3=buffer
-            if (g_sata_port != -1) {
-                AhciDriver::getInstance().write(g_sata_port, arg1, arg2, (void*)arg3);
-            }
             break;
 
         default:

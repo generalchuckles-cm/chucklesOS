@@ -22,7 +22,7 @@ volatile bool g_mouse_middle = false;
 
 // --- PS/2 Maps (US Layout Set 1) ---
 
-static const char kbd_US_low [128] = {
+static const char kbd_US_low[128] = {
     // 0x00 - 0x09
     0, 27, '1', '2', '3', '4', '5', '6', '7', '8',
     // 0x0A - 0x13
@@ -76,7 +76,22 @@ static const char kbd_US_high [128] = {
 
 static char scancode_to_ascii(std::uint8_t code) {
     if (code > 127) return 0; // Prevent Out of Bounds
-    return g_shift_pressed ? kbd_US_high[code] : kbd_US_low[code];
+    
+    // Get the base character based on shift state
+    char c = g_shift_pressed ? kbd_US_high[code] : kbd_US_low[code];
+    
+    // BUG FIX: Handle CTRL + Letter
+    // ASCII standard dictates that Ctrl+A = 1, Ctrl+B = 2 ... Ctrl+S = 19
+    if (g_ctrl_pressed) {
+        if (c >= 'a' && c <= 'z') {
+            return c - 'a' + 1;
+        }
+        if (c >= 'A' && c <= 'Z') {
+            return c - 'A' + 1;
+        }
+    }
+    
+    return c;
 }
 
 void input_buffer_push(char c) {
