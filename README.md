@@ -14,6 +14,10 @@ Tested machines:
 
 It makes use of the Limine bootloader.
 
+
+CHANGELOG (05.02.26):
+Fixed some minor bugs. Removed broken things like the xHCI driver, iGPU driver that doesnt work, cpl, cpc, etc
+
 Current Functions (12.14.25):
 Full SATA/AHCI Support
 FAT32 Filesystem
@@ -25,16 +29,14 @@ NES Emulator (Only Mapper 0 games will work. Mapper 4 games half work but are ve
     ### It plays at intended speed.
 Window Manager with Windows 98 SE Theme
 PS/2 Keyboard/Mouse support
-
-
-
-Current Functions (05.02.26):
 ChucklesScript much better
 NES and Text Editor are windowed
 Theme editor
 Display options
 SMP Support (Theoreticlly up to 32 Cores)
 System Stats
+
+
 
 
 
