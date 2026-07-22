@@ -15,6 +15,9 @@ Tested machines:
 It makes use of the Limine bootloader.
 
 
+CHANGELOG (07.22.26):
+Fixed the NES emulator. Runs mapper 4 games properly, speed issues should be fixed.
+
 CHANGELOG (05.02.26):
 Fixed some minor bugs. Removed broken things like the xHCI driver, iGPU driver that doesnt work, cpl, cpc, etc
 
