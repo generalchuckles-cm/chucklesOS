@@ -45,17 +45,15 @@ static uint32_t get_nes_color(uint8_t palette_idx) {
     return nes_palette[palette_idx & 0x3F];
 }
 
-// --- ACTUAL CLASS IMPLEMENTATION ---
-
 NESApp::NESApp(const char* filename) {
     if (filename) strcpy(rom_file, filename);
     else rom_file[0] = 0;
     
-    // Clear State
     memset(&cpu, 0, sizeof(CPU6502));
     memset(&ppu, 0, sizeof(PPU2C02));
     memset(&cart, 0, sizeof(Cartridge));
     memset(&m4, 0, sizeof(Mapper4State));
+    m3_chr_bank = 0;
     
     controller_state = 0;
     controller_latch = 0;
@@ -67,7 +65,6 @@ NESApp::NESApp(const char* filename) {
 }
 
 NESApp::~NESApp() {
-    // Robust cleanup
     if (cart.prg_rom) { free(cart.prg_rom); cart.prg_rom = nullptr; }
     if (cart.chr_rom) { free(cart.chr_rom); cart.chr_rom = nullptr; }
     if (cart.prg_ram) { free(cart.prg_ram); cart.prg_ram = nullptr; }
@@ -125,6 +122,9 @@ void NESApp::init_emulation() {
     
     cart.prg_banks = file_buf[4]; cart.chr_banks = file_buf[5];
     cart.mapper = (file_buf[6] >> 4) | (file_buf[7] & 0xF0);
+    if (memcmp(file_buf + 7, "DiskDude", 8) == 0) {
+        cart.mapper = file_buf[6] >> 4; 
+    }
     cart.mirroring = (file_buf[6] & 1); 
     
     printf("NES: Mapper %d, PRG %d, CHR %d\n", cart.mapper, cart.prg_banks, cart.chr_banks);
@@ -151,6 +151,8 @@ void NESApp::init_emulation() {
     ppu.oam_addr = 0; ppu.fine_x = 0; ppu.v = 0; ppu.t = 0; 
     ppu.data_buf = 0; ppu.w = 0; ppu.scanline = 0; ppu.cycle = 0;
     
+    m3_chr_bank = 0;
+
     if (cart.mapper == 4) {
         memset(&m4, 0, sizeof(Mapper4State));
         m4.prg_mode = 0;
@@ -176,19 +178,15 @@ void NESApp::mapper4_irq_clock() {
 }
 
 void NESApp::mapper4_update_offsets() {
-    int prg_len = cart.prg_banks * 16384; 
-    int last_8k = prg_len - 8192;
-    int second_last_8k = prg_len - 16384;
+    int total_8k_prg = cart.prg_banks * 2;
+    if (total_8k_prg <= 0) total_8k_prg = 1;
 
-    int r6_bank = m4.regs[6] * 8192;
-    int r7_bank = m4.regs[7] * 8192;
-    
-    if (prg_len > 0) {
-        r6_bank %= prg_len; 
-        r7_bank %= prg_len;
-        if (second_last_8k < 0) second_last_8k = 0;
-        if (last_8k < 0) last_8k = 0;
-    }
+    int last_8k = (total_8k_prg - 1) * 8192;
+    int second_last_8k = (total_8k_prg - 2) * 8192;
+    if (second_last_8k < 0) second_last_8k = 0;
+
+    int r6_bank = (m4.regs[6] % total_8k_prg) * 8192;
+    int r7_bank = (m4.regs[7] % total_8k_prg) * 8192;
 
     if (m4.prg_mode == 0) {
         m4.prg_offsets[0] = r6_bank;
@@ -202,18 +200,15 @@ void NESApp::mapper4_update_offsets() {
         m4.prg_offsets[3] = last_8k;
     }
 
-    int chr_len = cart.chr_banks * 8192;
-    if (chr_len == 0) return; 
+    int total_1k_chr = cart.chr_banks * 8;
+    if (total_1k_chr <= 0) return; 
 
-    int r0 = (m4.regs[0] & 0xFE) * 1024;
-    int r1 = (m4.regs[1] & 0xFE) * 1024;
-    int r2 = m4.regs[2] * 1024;
-    int r3 = m4.regs[3] * 1024;
-    int r4 = m4.regs[4] * 1024;
-    int r5 = m4.regs[5] * 1024;
-
-    r0 %= chr_len; r1 %= chr_len; r2 %= chr_len;
-    r3 %= chr_len; r4 %= chr_len; r5 %= chr_len;
+    int r0 = ((m4.regs[0] & 0xFE) % total_1k_chr) * 1024;
+    int r1 = ((m4.regs[1] & 0xFE) % total_1k_chr) * 1024;
+    int r2 = (m4.regs[2] % total_1k_chr) * 1024;
+    int r3 = (m4.regs[3] % total_1k_chr) * 1024;
+    int r4 = (m4.regs[4] % total_1k_chr) * 1024;
+    int r5 = (m4.regs[5] % total_1k_chr) * 1024;
 
     if (m4.chr_mode == 0) {
         m4.chr_offsets[0] = r0; m4.chr_offsets[1] = r0 + 1024;
@@ -229,9 +224,13 @@ void NESApp::mapper4_update_offsets() {
 }
 
 uint8_t NESApp::get_chr_byte(uint16_t addr) {
+    if (cart.mapper == 3 && cart.chr_banks > 0) {
+        int bank = m3_chr_bank % cart.chr_banks;
+        return cart.chr_rom[(bank * 8192) + (addr & 0x1FFF)];
+    }
     if (cart.mapper == 4 && cart.chr_banks > 0) {
-        int bank = addr / 1024;
-        int off = addr % 1024;
+        int bank = (addr & 0x1FFF) / 1024;
+        int off = addr & 0x03FF;
         return cart.chr_rom[m4.chr_offsets[bank] + off];
     }
     return cart.chr_rom[addr & 0x1FFF]; 
@@ -329,30 +328,35 @@ void NESApp::cpu_write(uint16_t addr, uint8_t data) {
     else if (addr >= 0x6000 && addr < 0x8000) {
         cart.prg_ram[addr - 0x6000] = data;
     }
-    else if (addr >= 0x8000 && cart.mapper == 4) {
-        if (addr <= 0x9FFF) {
-            if ((addr & 1) == 0) {
-                m4.bank_select = data & 7;
-                m4.prg_mode = (data >> 6) & 1;
-                m4.chr_mode = (data >> 7) & 1;
-                mapper4_update_offsets();
+    else if (addr >= 0x8000) {
+        if (cart.mapper == 3) {
+            m3_chr_bank = data;
+        }
+        else if (cart.mapper == 4) {
+            if (addr <= 0x9FFF) {
+                if ((addr & 1) == 0) {
+                    m4.bank_select = data & 7;
+                    m4.prg_mode = (data >> 6) & 1;
+                    m4.chr_mode = (data >> 7) & 1;
+                    mapper4_update_offsets();
+                } else {
+                    m4.regs[m4.bank_select] = data;
+                    mapper4_update_offsets();
+                }
+            } else if (addr <= 0xBFFF) {
+                if ((addr & 1) == 0) {
+                    if (cart.mirroring != 4) cart.mirroring = (data & 1) ? 0 : 1; 
+                }
+            } else if (addr <= 0xDFFF) {
+                if ((addr & 1) == 0) m4.irq_latch = data; 
+                else m4.irq_reload = true;                
             } else {
-                m4.regs[m4.bank_select] = data;
-                mapper4_update_offsets();
+                 if ((addr & 1) == 0) {
+                    m4.irq_enabled = false;
+                    cpu.irq_pending = false; 
+                }
+                else m4.irq_enabled = true;
             }
-        } else if (addr <= 0xBFFF) {
-            if ((addr & 1) == 0) {
-                if (cart.mirroring != 4) cart.mirroring = (data & 1); 
-            }
-        } else if (addr <= 0xDFFF) {
-            if ((addr & 1) == 0) m4.irq_latch = data; 
-            else m4.irq_reload = true;                
-        } else if (addr <= 0xFFFF) {
-             if ((addr & 1) == 0) {
-                m4.irq_enabled = false;
-                cpu.irq_pending = false; 
-            }
-            else m4.irq_enabled = true;
         }
     }
 }
@@ -364,6 +368,7 @@ uint8_t NESApp::ppu_read(uint16_t addr) {
     }
     else if (addr < 0x3F00) {
         uint16_t off = addr & 0x0FFF;
+        // 1 = Vertical Mirroring, 0 = Horizontal Mirroring
         int nt = (cart.mirroring == 1) ? ((off & 0x400) ? 1 : 0) : ((off & 0x800) ? 1 : 0);
         return ppu.name_tables[nt][off & 0x3FF]; 
     }
@@ -416,7 +421,6 @@ void NESApp::cpu_step() {
 
     uint8_t op = cpu_read(cpu.pc++);
     
-    // Lambdas capturing this (via &) to access member functions
     auto IMM = [&]() { return cpu.pc++; };
     auto ZP  = [&]() { return (uint16_t)cpu_read(cpu.pc++); };
     auto ZPX = [&]() { return (uint16_t)((cpu_read(cpu.pc++) + cpu.x) & 0xFF); };
@@ -438,7 +442,6 @@ void NESApp::cpu_step() {
     
     uint16_t addr = 0;
 
-    // Same opcode switch table, using 'cpu' member access
     switch(op) {
         case 0xA9: cpu.a = cpu_read(IMM()); update_nz(cpu, cpu.a); cpu.cycles+=2; break; 
         case 0xA5: cpu.a = cpu_read(ZP());  update_nz(cpu, cpu.a); cpu.cycles+=3; break;
@@ -631,7 +634,7 @@ void NESApp::on_draw() {
     uint64_t now = rdtsc_serialized();
     if (now < next_frame_ticks) return; 
 
-    if (now > next_frame_ticks + ticks_per_frame) {
+    if (now > next_frame_ticks + (ticks_per_frame * 3)) {
         next_frame_ticks = now; 
     }
     next_frame_ticks += ticks_per_frame;
@@ -669,12 +672,16 @@ void NESApp::on_draw() {
         
         for (uint64_t i=0; i<delta*3; i++) {
             ppu.cycle++;
-            if (ppu.cycle >= 341) {
-                ppu.cycle = 0; ppu.scanline++;
-                
-                if (cart.mapper == 4 && ppu.scanline >= 0 && ppu.scanline <= 239) {
+            
+            if (ppu.cycle == 260) {
+                if (cart.mapper == 4 && (ppu.mask & 0x18) != 0 && ppu.scanline >= 0 && ppu.scanline <= 239) {
                     mapper4_irq_clock();
                 }
+            }
+
+            if (ppu.cycle >= 341) {
+                ppu.cycle = 0; 
+                ppu.scanline++;
 
                 if (ppu.scanline == 241) {
                      ppu.status |= 0x80;
@@ -684,7 +691,7 @@ void NESApp::on_draw() {
                      ppu.scanline = -1;
                      ppu.status &= ~0x80; ppu.status &= ~0x40;
                      if (ppu.mask & 0x18) {
-                         ppu.v = (ppu.v & 0x041F) | (ppu.t & 0x7BE0);
+                         ppu.v = ppu.t; 
                      }
                 }
                 
@@ -713,8 +720,8 @@ void NESApp::on_draw() {
                             int nt = (v >> 10) & 0x03;
                             
                             int physical_nt;
-                            if (cart.mirroring == 0) physical_nt = (nt & 2) ? 1 : 0;
-                            else physical_nt = (nt & 1) ? 1 : 0;
+                            if (cart.mirroring == 1) physical_nt = (nt & 1) ? 1 : 0; 
+                            else physical_nt = (nt & 2) ? 1 : 0;                     
                             
                             uint8_t tile_id = ppu.name_tables[physical_nt][(coarse_y * 32) + coarse_x];
                             uint8_t attr_byte = ppu.name_tables[physical_nt][0x3C0 + ((coarse_y / 4) * 8) + (coarse_x / 4)];

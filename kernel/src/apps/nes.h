@@ -69,11 +69,12 @@ private:
     uint64_t next_frame_ticks;
     uint64_t ticks_per_frame;
     
-    // Emulation State (Now Members!)
+    // Emulation State
     CPU6502 cpu;
     PPU2C02 ppu;
     Cartridge cart;
     Mapper4State m4;
+    uint8_t m3_chr_bank; // Mapper 3 CHR Bank register
     
     uint8_t controller_state;
     uint8_t controller_latch;

@@ -1,10 +1,17 @@
+# Binaries, Images & Logs
+*.iso
+*.img
+*.log
+*.txt
+
+# Python Scripts
+*.py
+
+# Build / External Directories
+/edk2-ovmf/
 /edk2-omvf/
 /limine/
-/disk.img
-/convertimage.py
-/*.json
 /node_modules/
 /Physical
-
-cpu.log
-cpu.txt
+/*.json
+*.zip

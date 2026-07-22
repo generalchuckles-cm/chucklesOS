@@ -4,11 +4,9 @@
 #include "../memory/pmm.h"
 #include "../memory/heap.h"
 
-// --- DMA Allocator Helpers ---
 static void* dma_alloc(size_t pages) {
     void* phys = pmm_alloc(pages);
     if (!phys) return nullptr;
-    // Assume HHDM is set in pmm.cpp global
     extern uint64_t g_hhdm_offset;
     return (void*)((uint64_t)phys + g_hhdm_offset);
 }
@@ -63,7 +61,6 @@ void Fat32::set_next_cluster(uint32_t cluster, uint32_t next) {
     AhciDriver::getInstance().read(port_index, fat_sector, 1, buf);
     *(uint32_t*)&buf[ent_offset] = (next & 0x0FFFFFFF);
     
-    // Write to all FAT copies
     for (int i = 0; i < bpb.fat_count; i++) {
         AhciDriver::getInstance().write(port_index, fat_sector + (i * sectors_per_fat), 1, buf);
     }
@@ -83,18 +80,19 @@ uint32_t Fat32::allocate_cluster() {
 
              if ((table[j] & 0x0FFFFFFF) == FAT32_ENTRY_FREE) {
                  uint32_t cluster = (i * 128) + j;
-                 
                  table[j] = FAT32_ENTRY_EOC;
                  
                  for (int f = 0; f < bpb.fat_count; f++) {
                      AhciDriver::getInstance().write(port_index, fat_start_lba + i + (f * sectors_per_fat), 1, buf);
                  }
                  
-                 uint8_t* zero = (uint8_t*)dma_alloc(1); 
+                 uint32_t bytes_per_cluster = bpb.sectors_per_cluster * 512;
+                 size_t pages_needed = (bytes_per_cluster + 4095) / 4096;
+                 uint8_t* zero = (uint8_t*)dma_alloc(pages_needed); 
                  if (zero) {
-                     memset(zero, 0, 4096);
+                     memset(zero, 0, bytes_per_cluster);
                      AhciDriver::getInstance().write(port_index, cluster_to_lba(cluster), bpb.sectors_per_cluster, zero);
-                     dma_free(zero, 1);
+                     dma_free(zero, pages_needed);
                  }
                  
                  dma_free(buf, 1);
@@ -184,18 +182,15 @@ bool Fat32::format(int port, uint32_t size_sectors) {
     memcpy(new_bpb->fs_type, "FAT32   ", 8);
     new_bpb->volume_id = 0xCAFEBABE;
 
-    // SAVE CRITICAL VALUES before we repurpose the buffer
     uint32_t saved_reserved = new_bpb->reserved_sectors;
     uint32_t saved_sectors_fat = new_bpb->sectors_per_fat_32;
     uint32_t saved_fat_count = new_bpb->fat_count;
 
-    // 1. Write BPB
     if (!AhciDriver::getInstance().write(port, 0, 1, buf)) {
         printf("FAT32: Write BPB Failed.\n");
         dma_free(buf, 1); return false;
     }
 
-    // 2. Write FSInfo
     memset(buf, 0, 512);
     FSInfo* info = (FSInfo*)buf;
     info->lead_sig = 0x41615252;
@@ -207,15 +202,13 @@ bool Fat32::format(int port, uint32_t size_sectors) {
 
     dma_free(buf, 1);
 
-    // 3. ZERO OUT FAT TABLES
     uint32_t fat_total_sectors = saved_sectors_fat * saved_fat_count;
     uint32_t fat_start = saved_reserved;
     
     printf("Wiping FAT (%d sectors)... ", fat_total_sectors);
     
-    // Allocate 64KB chunks (128 sectors)
     uint32_t chunk_size = 128;
-    uint8_t* big_buf = (uint8_t*)dma_alloc(16); // 16 pages
+    uint8_t* big_buf = (uint8_t*)dma_alloc(16);
     if (!big_buf) return false;
     memset(big_buf, 0, 4096 * 16);
 
@@ -232,18 +225,16 @@ bool Fat32::format(int port, uint32_t size_sectors) {
     printf(" Done.\n");
     dma_free(big_buf, 16);
 
-    // 4. Init FAT Headers
     buf = (uint8_t*)dma_alloc(1);
     memset(buf, 0, 512);
     uint32_t* fat_table = (uint32_t*)buf;
     fat_table[0] = 0x0FFFFFF8;
     fat_table[1] = 0xFFFFFFFF;
-    fat_table[2] = 0x0FFFFFFF; // Root Dir EOF
+    fat_table[2] = 0x0FFFFFFF; 
     
     AhciDriver::getInstance().write(port, saved_reserved, 1, buf);
     AhciDriver::getInstance().write(port, saved_reserved + saved_sectors_fat, 1, buf);
 
-    // 5. Zero Root Directory
     uint32_t data_start = saved_reserved + (saved_fat_count * saved_sectors_fat);
     memset(buf, 0, 4096); 
     AhciDriver::getInstance().write(port, data_start, 8, buf); 
@@ -260,7 +251,9 @@ void Fat32::ls() {
     }
     
     uint32_t cluster = root_cluster;
-    uint8_t* buf = (uint8_t*)dma_alloc(1); 
+    uint32_t bytes_per_cluster = bpb.sectors_per_cluster * 512;
+    size_t pages_needed = (bytes_per_cluster + 4095) / 4096;
+    uint8_t* buf = (uint8_t*)dma_alloc(pages_needed); 
     if (!buf) return;
     
     printf("Directory Listing:\n");
@@ -270,7 +263,7 @@ void Fat32::ls() {
         AhciDriver::getInstance().read(port_index, lba, bpb.sectors_per_cluster, buf);
         
         FatDirectoryEntry* entry = (FatDirectoryEntry*)buf;
-        for (int i=0; i < (512 * bpb.sectors_per_cluster) / 32; i++) {
+        for (int i=0; i < (int)(bytes_per_cluster / 32); i++) {
             if (entry[i].name[0] == 0x00) break; 
             if (entry[i].name[0] == 0xE5) continue;
             
@@ -296,7 +289,7 @@ void Fat32::ls() {
         }
         cluster = get_next_cluster(cluster);
     }
-    dma_free(buf, 1);
+    dma_free(buf, pages_needed);
 }
 
 uint32_t Fat32::find_entry(const char* filename, FatDirectoryEntry* out_entry, uint32_t* out_dir_clus, uint32_t* out_offset) {
@@ -307,7 +300,10 @@ uint32_t Fat32::find_entry(const char* filename, FatDirectoryEntry* out_entry, u
     to_dos_filename(filename, dos_name, dos_ext);
 
     uint32_t cluster = root_cluster;
-    uint8_t* buf = (uint8_t*)dma_alloc(1);
+    uint32_t bytes_per_cluster = bpb.sectors_per_cluster * 512;
+    size_t pages_needed = (bytes_per_cluster + 4095) / 4096;
+
+    uint8_t* buf = (uint8_t*)dma_alloc(pages_needed);
     if (!buf) return 0;
     
     while (cluster < 0x0FFFFFF8 && cluster != 0) {
@@ -315,7 +311,7 @@ uint32_t Fat32::find_entry(const char* filename, FatDirectoryEntry* out_entry, u
         AhciDriver::getInstance().read(port_index, lba, bpb.sectors_per_cluster, buf);
         
         FatDirectoryEntry* entry = (FatDirectoryEntry*)buf;
-        int max_entries = (512 * bpb.sectors_per_cluster) / 32;
+        int max_entries = bytes_per_cluster / 32;
 
         for (int i=0; i < max_entries; i++) {
             if (entry[i].name[0] == 0x00) break; 
@@ -328,13 +324,13 @@ uint32_t Fat32::find_entry(const char* filename, FatDirectoryEntry* out_entry, u
                 if(out_entry) *out_entry = entry[i];
                 if(out_dir_clus) *out_dir_clus = cluster;
                 if(out_offset) *out_offset = i; 
-                dma_free(buf, 1);
+                dma_free(buf, pages_needed);
                 return (entry[i].cluster_high << 16) | entry[i].cluster_low;
             }
         }
         cluster = get_next_cluster(cluster);
     }
-    dma_free(buf, 1);
+    dma_free(buf, pages_needed);
     return 0;
 }
 
@@ -351,7 +347,10 @@ bool Fat32::read_file(const char* filename, void* buffer, uint32_t buffer_len) {
     }
 
     uint8_t* out_ptr = (uint8_t*)buffer;
-    uint8_t* temp = (uint8_t*)dma_alloc(1);
+    uint32_t bytes_per_cluster = bpb.sectors_per_cluster * 512;
+    size_t pages_needed = (bytes_per_cluster + 4095) / 4096;
+
+    uint8_t* temp = (uint8_t*)dma_alloc(pages_needed);
     if (!temp) return false;
     
     uint32_t remaining = entry.file_size;
@@ -359,13 +358,13 @@ bool Fat32::read_file(const char* filename, void* buffer, uint32_t buffer_len) {
         uint32_t lba = cluster_to_lba(cluster);
         AhciDriver::getInstance().read(port_index, lba, bpb.sectors_per_cluster, temp);
         
-        uint32_t chunk = (remaining > 4096) ? 4096 : remaining;
+        uint32_t chunk = (remaining > bytes_per_cluster) ? bytes_per_cluster : remaining;
         memcpy(out_ptr, temp, chunk);
         out_ptr += chunk;
         remaining -= chunk;
         cluster = get_next_cluster(cluster);
     }
-    dma_free(temp, 1);
+    dma_free(temp, pages_needed);
     return true;
 }
 
@@ -386,19 +385,22 @@ bool Fat32::create_file(const char* filename) {
     new_ent.file_size = 0;
 
     uint32_t cluster = root_cluster;
-    uint8_t* buf = (uint8_t*)dma_alloc(1);
+    uint32_t bytes_per_cluster = bpb.sectors_per_cluster * 512;
+    size_t pages_needed = (bytes_per_cluster + 4095) / 4096;
+
+    uint8_t* buf = (uint8_t*)dma_alloc(pages_needed);
     if (!buf) return false;
     
     while (cluster < 0x0FFFFFF8 && cluster != 0) {
         AhciDriver::getInstance().read(port_index, cluster_to_lba(cluster), bpb.sectors_per_cluster, buf);
         FatDirectoryEntry* entry = (FatDirectoryEntry*)buf;
-        int max_entries = (512 * bpb.sectors_per_cluster) / 32;
+        int max_entries = bytes_per_cluster / 32;
 
         for (int i=0; i < max_entries; i++) {
             if (entry[i].name[0] == 0x00 || entry[i].name[0] == 0xE5) {
                 entry[i] = new_ent;
                 AhciDriver::getInstance().write(port_index, cluster_to_lba(cluster), bpb.sectors_per_cluster, buf);
-                dma_free(buf, 1);
+                dma_free(buf, pages_needed);
                 return true;
             }
         }
@@ -414,7 +416,7 @@ bool Fat32::create_file(const char* filename) {
         }
     }
 
-    dma_free(buf, 1);
+    dma_free(buf, pages_needed);
     return false;
 }
 
@@ -431,15 +433,18 @@ bool Fat32::write_file(const char* filename, void* data, uint32_t len) {
     }
 
     uint8_t* src = (uint8_t*)data;
-    uint8_t* temp = (uint8_t*)dma_alloc(1);
+    uint32_t bytes_per_cluster = bpb.sectors_per_cluster * 512;
+    size_t pages_needed = (bytes_per_cluster + 4095) / 4096;
+
+    uint8_t* temp = (uint8_t*)dma_alloc(pages_needed);
     if (!temp) return false;
 
     uint32_t bytes_left = len;
     uint32_t curr_clus = cluster;
     
     while (bytes_left > 0) {
-        uint32_t chunk = (bytes_left > 4096) ? 4096 : bytes_left;
-        memset(temp, 0, 4096);
+        uint32_t chunk = (bytes_left > bytes_per_cluster) ? bytes_per_cluster : bytes_left;
+        memset(temp, 0, bytes_per_cluster);
         memcpy(temp, src, chunk);
         
         AhciDriver::getInstance().write(port_index, cluster_to_lba(curr_clus), bpb.sectors_per_cluster, temp);
@@ -451,7 +456,7 @@ bool Fat32::write_file(const char* filename, void* data, uint32_t len) {
             uint32_t next = get_next_cluster(curr_clus);
             if (next >= 0x0FFFFFF8) {
                 next = allocate_cluster();
-                if (next == 0) { dma_free(temp, 1); return false; }
+                if (next == 0) { dma_free(temp, pages_needed); return false; }
                 set_next_cluster(curr_clus, next);
             }
             curr_clus = next;
@@ -463,6 +468,6 @@ bool Fat32::write_file(const char* filename, void* data, uint32_t len) {
     entries[dir_offset].file_size = len;
     AhciDriver::getInstance().write(port_index, cluster_to_lba(dir_clus), bpb.sectors_per_cluster, temp);
 
-    dma_free(temp, 1);
+    dma_free(temp, pages_needed);
     return true;
 }
