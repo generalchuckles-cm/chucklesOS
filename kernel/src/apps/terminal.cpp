@@ -9,10 +9,9 @@
 #include "../dvd.h"
 #include "../3dengine/engine.h"
 #include "../apps/nes.h"
-#include "../browse/browse.h"
 #include "../apps/text_editor.h" 
 #include "../apps/display_settings.h"
-#include "../apps/lang_vm.h" // Added for the Scripting VM
+#include "../apps/lang_vm.h"
 
 // Hardware/System Headers
 #include "../pci/lspci.h"
@@ -97,12 +96,6 @@ void TerminalApp::execute_command() {
         Window* win = new Window(200, 200, 512, 480, "Nintendo", app); 
         WindowManager::getInstance().add_window(win);
     }
-    else if (strcmp(argv[0], "browse") == 0) {
-        BrowserApp* app = new BrowserApp();
-        Window* win = new Window(150, 150, 800, 600, "ChucklesBrowse", app);
-        WindowManager::getInstance().add_window(win);
-        if (argc > 1) app->navigate(argv[1]);
-    }
     else if (strcmp(argv[0], "term") == 0) {
         TerminalApp* app = new TerminalApp();
         Window* win = new Window(100, 100, 600, 400, "Terminal", app);
@@ -116,7 +109,7 @@ void TerminalApp::execute_command() {
     }
     else if (strcmp(argv[0], "disp") == 0) {
         DisplaySettingsApp* app = new DisplaySettingsApp();
-        Window* win = new Window(100, 100, 280, 400, "Display Settings", app);
+        Window* win = new Window(100, 100, 290, 400, "Display Settings", app);
         WindowManager::getInstance().add_window(win);
     }
     // --- SCRIPTING VM ---
@@ -140,7 +133,6 @@ void TerminalApp::execute_command() {
     }
     else if (strcmp(argv[0], "format") == 0) {
         if (g_sata_port != -1) {
-            // Defaulting to 128MB (262,144 sectors of 512 bytes)
             uint32_t sectors = 262144; 
             printf("Formatting disk on SATA port %d (128MB)...\n", g_sata_port);
             if (Fat32::getInstance().format(g_sata_port, sectors)) {
@@ -153,7 +145,7 @@ void TerminalApp::execute_command() {
         }
     }
     else if (strcmp(argv[0], "help") == 0) {
-        printf("GUI Apps: dvd, 3drnd, nes, browse, term, edit, disp\n");
+        printf("GUI Apps: dvd, 3drnd, nes, term, edit, disp\n");
         printf("System:   ls, format, run, reboot, clear, sysinfo, lspci\n");
     }
     else if (strcmp(argv[0], "reboot") == 0) {

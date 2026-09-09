@@ -11,7 +11,8 @@ static void* phys_to_virt(uint64_t phys) {
 
 static uint64_t virt_to_phys_addr(void* vaddr) {
     uint64_t addr = (uint64_t)vaddr;
-    if (addr >= g_hhdm_offset) {
+    // Only direct-subtract if the address is within the actual HHDM region (< MMIO/Heap ranges)
+    if (addr >= g_hhdm_offset && addr < 0xFFFFA00000000000ULL) {
         return addr - g_hhdm_offset;
     }
     return vmm_virt_to_phys(addr);
@@ -147,10 +148,12 @@ void AhciDriver::rebase_port(AhciPort* p) {
     p->cmd_table = (HBA_CMD_TABLE*)phys_to_virt(p->cmd_table_phys);
     memset(p->cmd_table, 0, 4096);
 
-    HBA_CMD_HEADER* hdr = &p->cmd_list[0];
-    hdr->ctba = (uint32_t)(p->cmd_table_phys & 0xFFFFFFFF);
-    hdr->ctbau = (uint32_t)(p->cmd_table_phys >> 32);
-    hdr->prdtl = 1; 
+    // Initialize all 32 command headers with the command table pointer
+    for (int i = 0; i < 32; i++) {
+        p->cmd_list[i].prdtl = 1;
+        p->cmd_list[i].ctba = (uint32_t)(p->cmd_table_phys & 0xFFFFFFFF);
+        p->cmd_list[i].ctbau = (uint32_t)(p->cmd_table_phys >> 32);
+    }
 
     start_cmd(p->port_reg);
 }
@@ -163,8 +166,6 @@ int AhciDriver::find_cmd_slot(HBA_PORT* port) {
     }
     return -1;
 }
-
-// --- IO OPS WITH TIMEOUTS ---
 
 bool AhciDriver::read(int port_index, uint64_t lba, uint32_t count, void* buffer) {
     if (port_index < 0 || port_index >= 32) return false;
@@ -183,6 +184,8 @@ bool AhciDriver::read(int port_index, uint64_t lba, uint32_t count, void* buffer
     cmdheader->cfl = sizeof(FIS_REG_H2D)/sizeof(uint32_t); 
     cmdheader->w = 0; 
     cmdheader->prdtl = 1;
+    cmdheader->ctba = (uint32_t)(p->cmd_table_phys & 0xFFFFFFFF);
+    cmdheader->ctbau = (uint32_t)(p->cmd_table_phys >> 32);
 
     HBA_CMD_TABLE* cmdtable = (HBA_CMD_TABLE*)p->cmd_table;
     memset(cmdtable, 0, sizeof(HBA_CMD_TABLE) + (cmdheader->prdtl-1)*sizeof(HBA_PRDT_ENTRY));
@@ -214,7 +217,6 @@ bool AhciDriver::read(int port_index, uint64_t lba, uint32_t count, void* buffer
 
     reg->ci |= (1 << slot);
 
-    // Timeout loop ~2 seconds
     uint64_t timeout = 2000; 
     while (true) {
         if ((reg->ci & (1 << slot)) == 0) break;
@@ -246,6 +248,8 @@ bool AhciDriver::write(int port_index, uint64_t lba, uint32_t count, const void*
     cmdheader->cfl = sizeof(FIS_REG_H2D)/sizeof(uint32_t); 
     cmdheader->w = 1; 
     cmdheader->prdtl = 1;
+    cmdheader->ctba = (uint32_t)(p->cmd_table_phys & 0xFFFFFFFF);
+    cmdheader->ctbau = (uint32_t)(p->cmd_table_phys >> 32);
 
     HBA_CMD_TABLE* cmdtable = (HBA_CMD_TABLE*)p->cmd_table;
     memset(cmdtable, 0, sizeof(HBA_CMD_TABLE) + (cmdheader->prdtl-1)*sizeof(HBA_PRDT_ENTRY));

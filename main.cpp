@@ -33,7 +33,7 @@ Console* g_console = nullptr;
 Renderer* g_renderer = nullptr;
 
 // Safe default set to 1600x900
-DisplaySettings g_display_settings = { MODE_32BIT, 0, 0, false };
+DisplaySettings g_display_settings = { MODE_32BIT, 1600, 900, false };
 HardwareDisplayInfo g_hardware_display = { 0, {}, 0, 0 };
 
 void (*g_ui_update_callback)() = nullptr;
