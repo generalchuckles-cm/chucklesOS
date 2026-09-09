@@ -15,6 +15,11 @@ Tested machines:
 It makes use of the Limine bootloader.
 
 
+(09.08.2026)
+Replace DE with modernized look
+Fix memory leaks and AHCI Bugs
+Sperated heap and phys RAM usage
+
 CHANGELOG (07.22.26):
 Fixed the NES emulator. Runs mapper 4 games properly, speed issues should be fixed.
 
